@@ -12,8 +12,14 @@ from datetime import datetime, timedelta
 import random
 import string
 import requests # NOVO: Para conversar com o Asaas
+import socket
 import smtplib
 from email.mime.text import MIMEText
+
+# --- CLASSE MÁGICA PARA FORÇAR O RENDER A USAR IPV4 NO E-MAIL ---
+class SMTP_IPv4(smtplib.SMTP):
+    def _get_socket(self, host, port, timeout):
+        return socket.create_connection((host, port), timeout, socket.AF_INET)
 
 app = FastAPI(title="API Locadora PS5")
 
@@ -254,7 +260,9 @@ def esqueci_senha(req: EsqueciSenhaRequest):
         msg['From'] = f"Equipe Bora Jogar <{remetente}>"
         msg['To'] = req.email
         
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        # Usando a classe que força a estrada antiga (IPv4) com a porta TLS
+        with SMTP_IPv4('smtp.gmail.com', 587) as smtp:
+            smtp.starttls() # Ativa a criptografia de segurança
             smtp.login(remetente, senha_app)
             smtp.send_message(msg)
             
