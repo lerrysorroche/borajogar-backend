@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import pyotp
 import jwt 
+import os
 from passlib.context import CryptContext 
 from datetime import datetime, timedelta
 import random
@@ -27,9 +28,9 @@ ALGORITHM = "HS256"
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ==============================================================================
-# INTEGRAÇÃO ASAAS (SANDBOX)
+# INTEGRAÇÃO ASAAS (PRODUÇÃO - DINHEIRO REAL)
 # ==============================================================================
-ASAAS_API_KEY = "$aact_prod_000MzkwODA2MWY2OGM3MWRlMDU2NWM3MzJlNzZmNGZhZGY6OjIyMGU0YmE2LWYwYmItNGMyYS1iOTg4LWYyY2ZmOTU5NzcwODo6JGFhY2hfMzZlNTZiMzEtNGRmMy00NTZjLTk4ZmYtMzMwMjU4MTEzY2Vm"
+ASAAS_API_KEY = os.getenv("ASAAS_API_KEY")
 ASAAS_URL = "https://api.asaas.com/v3"
 HEADERS_ASAAS = {
     "access_token": ASAAS_API_KEY,
@@ -54,8 +55,8 @@ def verificar_admin(authorization: str = Header(None)):
     except Exception: raise HTTPException(status_code=401, detail="Token inválido.")
 
 def get_db_connection():
-    """Abre a porta com o Banco de Dados PostgreSQL na Nuvem (Render)."""
-    DATABASE_URL = "postgresql://lerrysorroche:J5aeqre47RYVO24peNayv0DRRhGMFmjM@dpg-d6pjok3h46gs73c7m3gg-a.ohio-postgres.render.com/borajogar_db?sslmode=require"
+    """Abre a porta com o Banco de Dados PostgreSQL na Nuvem."""
+    DATABASE_URL = os.getenv("DATABASE_URL")
     return psycopg2.connect(DATABASE_URL)
 
 def gerar_codigo_convite(nome):
@@ -641,5 +642,6 @@ def iniciar_relogio():
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
 
     scheduler.start()
+
 
 
