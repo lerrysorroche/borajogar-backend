@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 import random
 import string
 import requests # NOVO: Para conversar com o Asaas
+import smtplib
+from email.mime.text import MIMEText
 
 app = FastAPI(title="API Locadora PS5")
 
@@ -69,6 +71,8 @@ class JogoNovo(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; d
 class ContaPSNNova(BaseModel): jogo_id: int; email_login: str; senha_login: str; mfa_secret: str = "" 
 class NovaLocacao(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int
 class LoginRequest(BaseModel): email: str; senha: str
+class EsqueciSenhaRequest(BaseModel): email: str
+class MudarSenhaRequest(BaseModel): utilizador_id: int; senha_atual: str; nova_senha: str
 class NovaReserva(BaseModel): utilizador_id: int; jogo_id: int
 class NovaRecarga(BaseModel): utilizador_id: int; valor: float; cupom: str = ""
 class NovoCupom(BaseModel): codigo: str; tipo: str; valor: float
@@ -196,6 +200,72 @@ def fazer_login(login: LoginRequest):
     del usuario['senha_hash'] 
     usuario['saldo'] = float(usuario['saldo'])
     return {"mensagem": "Login aprovado", "usuario": usuario, "token": token}
+
+
+# ==============================================================================
+# NOVAS ROTAS DE SENHA (RECUPERAÇÃO E ALTERAÇÃO)
+# ==============================================================================
+
+@app.post("/esqueci-senha")
+def esqueci_senha(req: EsqueciSenhaRequest):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("SELECT id, nome FROM utilizadores WHERE email = %s", (req.email,))
+    usuario = cursor.fetchone()
+    
+    if not usuario:
+        cursor.close(); conn.close()
+        return {"mensagem": "Se este e-mail estiver cadastrado, uma nova senha foi enviada."}
+    
+    caracteres = string.ascii_letters + string.digits
+    nova_senha = ''.join(random.choice(caracteres) for i in range(8))
+    senha_hash = gerar_hash_senha(nova_senha)
+    
+    cursor.execute("UPDATE utilizadores SET senha_hash = %s WHERE email = %s", (senha_hash, req.email))
+    conn.commit()
+    
+    try:
+        remetente = os.getenv("EMAIL_REMETENTE")
+        senha_app = os.getenv("EMAIL_SENHA_APP")
+        
+        texto_email = f"Olá, {usuario['nome']}!\n\nSua nova senha temporária para acessar a Bora Jogar é: {nova_senha}\n\nRecomendamos que você altere esta senha no seu Painel do Cliente logo após o login."
+        msg = MIMEText(texto_email)
+        msg['Subject'] = 'Bora Jogar - Recuperação de Senha'
+        msg['From'] = f"Equipe Bora Jogar <{remetente}>"
+        msg['To'] = req.email
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(remetente, senha_app)
+            smtp.send_message(msg)
+            
+    except Exception as e:
+        print(f"Erro ao enviar email: {e}")
+        pass
+    finally:
+        cursor.close(); conn.close()
+        
+    return {"mensagem": "Se este e-mail estiver cadastrado, uma nova senha foi enviada."}
+
+
+@app.post("/mudar-senha")
+def mudar_senha(req: MudarSenhaRequest):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("SELECT senha_hash FROM utilizadores WHERE id = %s", (req.utilizador_id,))
+    usuario = cursor.fetchone()
+    
+    if not usuario or not verificar_senha(req.senha_atual, usuario['senha_hash']):
+        cursor.close(); conn.close()
+        raise HTTPException(status_code=400, detail="A senha atual está incorreta.")
+        
+    novo_hash = gerar_hash_senha(req.nova_senha)
+    cursor.execute("UPDATE utilizadores SET senha_hash = %s WHERE id = %s", (novo_hash, req.utilizador_id))
+    conn.commit()
+    
+    cursor.close(); conn.close()
+    return {"mensagem": "Senha alterada com sucesso!"}
 
 
 # ==============================================================================
@@ -642,6 +712,3 @@ def iniciar_relogio():
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
 
     scheduler.start()
-
-
-
