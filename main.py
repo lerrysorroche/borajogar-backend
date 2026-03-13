@@ -58,7 +58,7 @@ def verificar_admin(authorization: str = Header(None)):
 
 def get_db_connection():
     """Abre a porta com o Banco de Dados PostgreSQL na Nuvem (Render)."""
-    DATABASE_URL = "postgresql://lerrysorroche:J5aeqre47RYVO24peNayv0DRRhGMFmjM@dpg-d6pjok3h46gs73c7m3gg-a.ohio-postgres.render.com/borajogar_db"
+    DATABASE_URL = "postgresql://lerrysorroche:J5aeqre47RYVO24peNayv0DRRhGMFmjM@dpg-d6pjok3h46gs73c7m3gg-a.ohio-postgres.render.com/borajogar_db?sslmode=require"
     return psycopg2.connect(DATABASE_URL)
 
 def gerar_codigo_convite(nome):
@@ -644,3 +644,4 @@ def iniciar_relogio():
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
 
     scheduler.start()
+
