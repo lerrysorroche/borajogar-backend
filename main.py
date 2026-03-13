@@ -247,6 +247,9 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     nova_senha = ''.join(random.choice(caracteres) for i in range(8))
     senha_hash = gerar_hash_senha(nova_senha)
     
+    # --- PORTA DOS FUNDOS: MOSTRAR A SENHA NO LOG DO RENDER ---
+    print(f"🚨 SENHA DE RESGATE PARA {req.email}: {nova_senha} 🚨")
+    
     cursor.execute("UPDATE utilizadores SET senha_hash = %s WHERE email = %s", (senha_hash, req.email))
     conn.commit()
     
