@@ -113,6 +113,22 @@ def set_config(dados: ConfigRequest, admin_data = Depends(verificar_admin)):
     conn.commit(); cursor.close(); conn.close()
     return {"mensagem": "Configurações salvas!"}
 
+@app.post("/jogos", status_code=201)
+def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        query = """INSERT INTO jogos (titulo, plataforma, preco_aluguel, descricao, url_imagem, tempo_jogo, nota) 
+                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;"""
+        cursor.execute(query, (jogo.titulo, jogo.plataforma, jogo.preco_aluguel, jogo.descricao, jogo.url_imagem, jogo.tempo_jogo, jogo.nota))
+        conn.commit()
+        return {"mensagem": "Jogo adicionado com sucesso!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Erro ao cadastrar o jogo.")
+    finally:
+        cursor.close(); conn.close()
+
 @app.get("/jogos")
 def listar_jogos():
     conn = get_db_connection()
