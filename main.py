@@ -16,10 +16,14 @@ import socket
 import smtplib
 from email.mime.text import MIMEText
 
-# --- CLASSE MÁGICA PARA FORÇAR O RENDER A USAR IPV4 NO E-MAIL ---
+# --- CLASSE MÁGICA CORRIGIDA PARA FORÇAR O RENDER A USAR IPV4 ---
 class SMTP_IPv4(smtplib.SMTP):
     def _get_socket(self, host, port, timeout):
-        return socket.create_connection((host, port), timeout, socket.AF_INET)
+        # Cria a conexão forçando estritamente o IPv4 (AF_INET)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        return sock
 
 app = FastAPI(title="API Locadora PS5")
 
