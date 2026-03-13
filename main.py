@@ -81,6 +81,7 @@ class AplicarMultaRequest(BaseModel): utilizador_id: int; valor: float = 50.0
 class AjusteSaldoRequest(BaseModel): utilizador_id: int; valor: float; motivo: str
 class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; anuncio_ativo: bool; mensagem_anuncio: str
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
+class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float
 
 @app.get("/")
 def home(): return {"mensagem": "API Online"}
@@ -703,6 +704,22 @@ def cadastrar_conta_psn(conta: ContaPSNNova, admin_data = Depends(verificar_admi
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail="Erro ao cadastrar conta.")
+    finally:
+        cursor.close(); conn.close()
+
+@app.patch("/jogos/{jogo_id}/preco")
+def atualizar_preco_jogo(jogo_id: int, dados: EditarPrecoJogoRequest, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE jogos SET preco_aluguel = %s WHERE id = %s", (dados.preco_aluguel, jogo_id))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Jogo não encontrado.")
+        conn.commit()
+        return {"mensagem": "Preço atualizado com sucesso!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Erro ao atualizar preço.")
     finally:
         cursor.close(); conn.close()
 
