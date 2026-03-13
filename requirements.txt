@@ -3,6 +3,7 @@ uvicorn
 psycopg2-binary
 PyJWT
 pyotp
-passlib[bcrypt]
+passlib
+bcrypt==3.2.2
 requests
 apscheduler
