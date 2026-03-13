@@ -16,12 +16,13 @@ import socket
 import smtplib
 from email.mime.text import MIMEText
 
-# --- CLASSE MÁGICA CORRIGIDA PARA FORÇAR O RENDER A USAR IPV4 ---
+# --- CLASSE MÁGICA 100% BLINDADA (IPV4) ---
 class SMTP_IPv4(smtplib.SMTP):
     def _get_socket(self, host, port, timeout):
-        # Cria a conexão forçando estritamente o IPv4 (AF_INET)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
+        # Se o Python mandar o objeto invisível, a gente ignora. Se for número, a gente usa!
+        if isinstance(timeout, (int, float)):
+            sock.settimeout(timeout)
         sock.connect((host, port))
         return sock
 
@@ -268,7 +269,7 @@ def esqueci_senha(req: EsqueciSenhaRequest):
         msg['To'] = req.email
         
         # Usando a classe que força a estrada antiga (IPv4) com a porta TLS
-        with SMTP_IPv4('smtp.gmail.com', 587) as smtp:
+        with SMTP_IPv4('smtp.gmail.com', 587, timeout=15) as smtp:
             smtp.starttls() # Ativa a criptografia de segurança
             smtp.login(remetente, senha_app)
             smtp.send_message(msg)
