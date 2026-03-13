@@ -661,6 +661,30 @@ def deletar_jogo(jogo_id: int, admin_data = Depends(verificar_admin)):
     finally:
         cursor.close(); conn.close()
 
+@app.post("/admin/locacoes/{locacao_id}/revogar")
+def revogar_locacao_admin(locacao_id: int, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Puxa os dados da locação
+        cursor.execute("SELECT conta_psn_id, status FROM locacoes WHERE id = %s", (locacao_id,))
+        loc = cursor.fetchone()
+        
+        if not loc or loc['status'] != 'ATIVA':
+            raise HTTPException(status_code=400, detail="Locação não encontrada ou já expirada.")
+        
+        # Encerra a locação no momento exato e joga para Manutenção
+        cursor.execute("UPDATE locacoes SET status = 'EXPIRADA', data_fim = CURRENT_TIMESTAMP WHERE id = %s", (locacao_id,))
+        cursor.execute("UPDATE contas_psn SET status = 'MANUTENCAO' WHERE id = %s", (loc['conta_psn_id'],))
+        conn.commit()
+        
+        return {"mensagem": "Locação revogada! A conta foi enviada para manutenção."}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close(); conn.close()
+
 @app.get("/admin/locacoes")
 def listar_todas_locacoes(admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
