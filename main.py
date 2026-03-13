@@ -16,7 +16,10 @@ app = FastAPI(title="API Locadora PS5")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=[
+        "https://borajogar-frontend.vercel.app", # Libera o seu site oficial
+        "http://localhost:5173" # Mantém liberado para seus testes no PC
+    ], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -639,4 +642,5 @@ def verificar_alugueis_vencidos():
 def iniciar_relogio():
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
+
     scheduler.start()
