@@ -11,22 +11,9 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta
 import random
 import string
-import requests # NOVO: Para conversar com o Asaas
-import socket
-import smtplib
-from email.mime.text import MIMEText
+import requests
 import urllib.request
 import json
-
-# --- CLASSE MÁGICA 100% BLINDADA (IPV4) ---
-class SMTP_IPv4(smtplib.SMTP):
-    def _get_socket(self, host, port, timeout):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Se o Python mandar o objeto invisível, a gente ignora. Se for número, a gente usa!
-        if isinstance(timeout, (int, float)):
-            sock.settimeout(timeout)
-        sock.connect((host, port))
-        return sock
 
 app = FastAPI(title="API Locadora PS5")
 
@@ -147,7 +134,6 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
 def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # ATENÇÃO: Adicionamos a linha "popularidade" contando o histórico de locações!
     query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.descricao, j.url_imagem, j.tempo_jogo, j.nota,
             (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
             (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
@@ -235,7 +221,7 @@ def fazer_login(login: LoginRequest):
 
 
 # ==============================================================================
-# NOVAS ROTAS DE SENHA (RECUPERAÇÃO E ALTERAÇÃO)
+# SENHA E E-MAIL (BREVO API)
 # ==============================================================================
 
 @app.post("/esqueci-senha")
@@ -254,7 +240,6 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     nova_senha = ''.join(random.choice(caracteres) for i in range(8))
     senha_hash = gerar_hash_senha(nova_senha)
     
-    # --- PORTA DOS FUNDOS: MOSTRAR A SENHA NO LOG DO RENDER ---
     print(f"🚨 SENHA DE RESGATE PARA {req.email}: {nova_senha} 🚨")
     
     cursor.execute("UPDATE utilizadores SET senha_hash = %s WHERE email = %s", (senha_hash, req.email))
@@ -271,7 +256,6 @@ def esqueci_senha(req: EsqueciSenhaRequest):
             "content-type": "application/json"
         }
         
-        # O Envelope Digital do Brevo
         payload = {
             "sender": {"name": "Equipe Bora Jogar", "email": remetente},
             "to": [{"email": req.email}],
@@ -290,7 +274,6 @@ def esqueci_senha(req: EsqueciSenhaRequest):
             """
         }
         
-        # Dispara o e-mail pela via expressa (HTTPS) escapando do bloqueio do Render
         req_http = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
         with urllib.request.urlopen(req_http) as response:
             print("✅ Email enviado via API do Brevo com sucesso!")
@@ -325,7 +308,7 @@ def mudar_senha(req: MudarSenhaRequest):
 
 
 # ==============================================================================
-# O NOVO MOTOR FINANCEIRO (Asaas PIX)
+# MOTOR FINANCEIRO (Asaas PIX)
 # ==============================================================================
 @app.post("/recarga/gerar-pix")
 def gerar_pix_asaas(recarga: NovaRecarga):
@@ -337,7 +320,6 @@ def gerar_pix_asaas(recarga: NovaRecarga):
         valor_bonus_cupom = 0.0
         cupom_id = None
         
-        # 1. Validações Locais (Cupom)
         if recarga.cupom:
             cursor.execute("SELECT id, tipo, valor FROM cupons WHERE codigo = %s AND ativo = TRUE", (recarga.cupom.upper(),))
             cupom = cursor.fetchone()
@@ -350,24 +332,19 @@ def gerar_pix_asaas(recarga: NovaRecarga):
             if cupom['tipo'] == 'FIXO': valor_bonus_cupom = cupom['valor']
             elif cupom['tipo'] == 'PORCENTAGEM': valor_bonus_cupom = recarga.valor * (cupom['valor'] / 100.0)
 
-        # 2. Puxa dados do cliente
         cursor.execute("SELECT nome, email FROM utilizadores WHERE id = %s", (recarga.utilizador_id,))
         usr = cursor.fetchone()
 
-        # 3. Cria o Cliente no Asaas 
-        # CORREÇÃO 3: Usando um CPF matemático de teste válido para o Sandbox
         payload_cli = {
             "name": usr['nome'], 
             "email": usr['email'],
-            "cpfCnpj": "12345678909" # CPF válido apenas para aprovação do gateway
+            "cpfCnpj": "12345678909"
         }
         res_cli = requests.post(f"{ASAAS_URL}/customers", json=payload_cli, headers=HEADERS_ASAAS)
         if res_cli.status_code not in [200, 201]: 
             raise Exception(f"Erro Asaas (Cliente): {res_cli.text}")
         cli_id = res_cli.json().get('id')
 
-        # 4. Gera a Cobrança PIX
-        # CORREÇÃO 2: Vencimento para amanhã (+1 dia) para evitar corte de fuso horário
         vencimento = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         payload_cob = {
             "customer": cli_id, 
@@ -381,19 +358,16 @@ def gerar_pix_asaas(recarga: NovaRecarga):
             raise Exception(f"Erro Asaas (Cobrança): {res_cob.text}")
         pay_id = res_cob.json().get('id')
 
-        # 5. Pede o QR Code dessa cobrança para o Asaas
         res_qr = requests.get(f"{ASAAS_URL}/payments/{pay_id}/pixQrCode", headers=HEADERS_ASAAS)
         if res_qr.status_code not in [200, 201]: 
             raise Exception(f"Erro Asaas (QRCode): {res_qr.text}")
         qr_data = res_qr.json()
 
-        # 6. Salva o pedido PENDENTE no nosso banco local
         cupom_nome = recarga.cupom.upper() if recarga.cupom else ""
         cursor.execute("INSERT INTO pedidos_pix (id, utilizador_id, valor_pago, valor_bonus, cupom) VALUES (%s, %s, %s, %s, %s)",
                        (pay_id, recarga.utilizador_id, recarga.valor, valor_bonus_cupom, cupom_nome))
         conn.commit()
 
-        # Devolve o QRCode pro Frontend exibir
         return {
             "payment_id": pay_id,
             "copia_cola": qr_data.get('payload'),
@@ -403,24 +377,19 @@ def gerar_pix_asaas(recarga: NovaRecarga):
     except Exception as e:
         conn.rollback()
         if isinstance(e, HTTPException): raise e
-        # Se der erro, agora o Toast vai mostrar o motivo EXATO do Asaas
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close(); conn.close()
 
 @app.get("/recarga/status/{payment_id}")
 def checar_status_pagamento(payment_id: str):
-    """Essa rota é chamada pelo React a cada 5 segundos para ver se o cliente já pagou."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Pergunta ao Asaas se o dinheiro já caiu na conta
         res = requests.get(f"{ASAAS_URL}/payments/{payment_id}", headers=HEADERS_ASAAS)
         status_asaas = res.json().get('status')
 
-        # RECEIVED (Asaas recebeu) ou CONFIRMED (dinheiro já liberado)
         if status_asaas in ['RECEIVED', 'CONFIRMED']:
-            # Puxa o nosso pedido PENDENTE local
             cursor.execute("SELECT * FROM pedidos_pix WHERE id = %s AND status = 'PENDENTE'", (payment_id,))
             pedido = cursor.fetchone()
             
@@ -430,39 +399,32 @@ def checar_status_pagamento(payment_id: str):
                 valor_bonus = pedido['valor_bonus']
                 cupom_nome = pedido['cupom']
 
-                # Verifica se é a PRIMEIRA RECARGA (Para o Bonus de Indicação)
                 cursor.execute("SELECT COUNT(*) as qtd FROM transacoes WHERE utilizador_id = %s AND descricao LIKE 'Recarga%%'", (user_id,))
                 eh_primeira_recarga = cursor.fetchone()['qtd'] == 0
 
-                # Deposita o saldo na conta da pessoa
                 valor_total = valor_pago + valor_bonus
                 cursor.execute("UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s RETURNING nome, indicado_por", (valor_total, user_id))
                 cliente = cursor.fetchone()
 
-                # Escreve os recibos no Extrato
                 cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, 'Recarga PIX')", (user_id, valor_pago))
                 
-                # Regras de Cupom
                 if valor_bonus > 0:
                     cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)", (user_id, valor_bonus, f"🎟️ Bônus Cupom ({cupom_nome})"))
                     cursor.execute("SELECT id FROM cupons WHERE codigo = %s", (cupom_nome,))
                     cupom_db = cursor.fetchone()
                     if cupom_db: cursor.execute("INSERT INTO cupons_usados (utilizador_id, cupom_id) VALUES (%s, %s)", (user_id, cupom_db['id']))
 
-                # Regras de Indicação (10% pro amigo)
                 if eh_primeira_recarga and cliente['indicado_por']:
                     id_amigo = cliente['indicado_por']
                     valor_indicacao = valor_pago * 0.10
                     cursor.execute("UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s", (valor_indicacao, id_amigo))
                     cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)", (id_amigo, valor_indicacao, f"🎁 Bônus de Indicação ({cliente['nome']})"))
 
-                # Tranca o pedido como PAGO para não ser creditado de novo
                 cursor.execute("UPDATE pedidos_pix SET status = 'CONCLUIDO' WHERE id = %s", (payment_id,))
                 conn.commit()
                 
                 return {"status": "PAGO"}
 
-        # Se não pagou ainda, manda "PENDENTE" pro React continuar aguardando
         return {"status": "PENDENTE"}
         
     except Exception as e:
@@ -472,7 +434,7 @@ def checar_status_pagamento(payment_id: str):
         cursor.close(); conn.close()
 
 # ==============================================================================
-# ROTAS GERAIS MANTIDAS INTACTAS
+# SISTEMA DE LOCAÇÃO, RESERVA E DEVOLUÇÃO
 # ==============================================================================
 
 @app.post("/devolver")
@@ -553,6 +515,10 @@ def realizar_locacao(locacao: NovaLocacao):
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close(); conn.close()
+
+# ==============================================================================
+# PAINEL DE ADMIN (ESTATÍSTICAS, JOGOS, MULTAS E FILAS)
+# ==============================================================================
 
 @app.get("/admin/estatisticas")
 def buscar_estatisticas_admin(admin_data = Depends(verificar_admin)):
@@ -650,6 +616,11 @@ def ajustar_saldo_manual(dados: AjusteSaldoRequest, admin_data = Depends(verific
     finally:
         cursor.close(); conn.close()
 
+
+# ==============================================================================
+# A ROTA MÁGICA: LIBERANDO CONTA E MANDANDO E-MAIL PRA FILA DE ESPERA
+# ==============================================================================
+
 @app.post("/admin/reset-senha")
 def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
@@ -658,6 +629,7 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
         cursor.execute("UPDATE contas_psn SET senha_login = %s WHERE id = %s RETURNING jogo_id", (dados.nova_senha, dados.conta_psn_id))
         jogo_id = cursor.fetchone()['jogo_id']
 
+        # Regra de Cashback para quem devolveu
         cursor.execute("SELECT id, utilizador_id, cashback_pendente FROM locacoes WHERE conta_psn_id = %s ORDER BY data_fim DESC LIMIT 1", (dados.conta_psn_id,))
         ultima_loc = cursor.fetchone()
         if ultima_loc and ultima_loc['cashback_pendente'] > 0:
@@ -667,22 +639,90 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
             cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, '♻️ Cashback Devolução Antecipada')", (usr, cash))
             cursor.execute("UPDATE locacoes SET cashback_pendente = 0 WHERE id = %s", (ultima_loc['id'],))
 
+        # Checa se existe alguém na fila
         cursor.execute("SELECT id, utilizador_id FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' ORDER BY data_solicitacao ASC LIMIT 1", (jogo_id,))
         proximo_da_fila = cursor.fetchone()
+        
         if proximo_da_fila:
+            # Transfere a conta pro sortudo
             cursor.execute("INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + 7 * INTERVAL '1 day', 'ATIVA')", (proximo_da_fila['utilizador_id'], dados.conta_psn_id))
             cursor.execute("UPDATE fila_espera SET status = 'CONCLUIDO' WHERE id = %s", (proximo_da_fila['id'],))
             cursor.execute("UPDATE contas_psn SET status = 'ALUGADA' WHERE id = %s", (dados.conta_psn_id,))
             mensagem = "Senha alterada! A conta foi entregue para o próximo da fila."
+            
+            # Puxa os dados para o E-mail antes de fechar a conexão
+            cursor.execute("SELECT nome, email FROM utilizadores WHERE id = %s", (proximo_da_fila['utilizador_id'],))
+            usr_fila = cursor.fetchone()
+            cursor.execute("SELECT titulo FROM jogos WHERE id = %s", (jogo_id,))
+            jogo_fila = cursor.fetchone()
+            
+            # SALVA TUDO NO BANCO DE DADOS AQUI (Para garantir que o jogo foi entregue mesmo se a internet cair)
+            conn.commit()
+
+            # --- DISPARO DE E-MAIL VIA BREVO ---
+            try:
+                nome_cliente = usr_fila['nome']
+                email_cliente = usr_fila['email']
+                nome_jogo = jogo_fila['titulo']
+                
+                remetente = os.getenv("EMAIL_REMETENTE")
+                chave_api = os.getenv("BREVO_API_KEY")
+                
+                if chave_api and remetente:
+                    url = "https://api.brevo.com/v3/smtp/email"
+                    headers = {
+                        "accept": "application/json",
+                        "api-key": chave_api,
+                        "content-type": "application/json"
+                    }
+                    
+                    payload = {
+                        "sender": {"name": "Equipe Bora Jogar", "email": remetente},
+                        "to": [{"email": email_cliente}],
+                        "subject": f"🎮 A espera acabou! Seu jogo {nome_jogo} está liberado!",
+                        "htmlContent": f"""
+                        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #3f3f46; border-radius: 15px; background-color: #18181b; color: #f4f4f5;">
+                            <div style="text-align: center; margin-bottom: 20px;">
+                                <h2 style="color: #34d399; margin: 0; font-size: 28px;">A FILA ANDOU! 🚀</h2>
+                            </div>
+                            
+                            <p style="font-size: 16px;">Olá, <strong>{nome_cliente}</strong>!</p>
+                            <p style="font-size: 16px; line-height: 1.5;">Temos ótimas notícias! A sua reserva chegou ao fim e a sua cópia do jogo <strong style="color: #60a5fa;">{nome_jogo}</strong> acabou de ser ativada na sua conta.</p>
+                            
+                            <div style="background-color: #27272a; padding: 20px; border-radius: 10px; margin: 30px 0; text-align: center; border-left: 4px solid #34d399;">
+                                <p style="margin: 0; font-size: 15px; color: #a1a1aa;">O E-mail, a Senha da PSN e o seu gerador de 2FA já estão esperando por você no seu painel.</p>
+                            </div>
+                            
+                            <div style="text-align: center; margin: 40px 0;">
+                                <a href="https://SEUSITE.vercel.app" style="background-color: #2563eb; color: white; padding: 16px 32px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 16px; display: inline-block;">🔑 Acessar Meu Jogo Agora</a>
+                            </div>
+                            
+                            <p style="color: #71717a; font-size: 13px; text-align: center; margin-top: 40px; border-top: 1px solid #3f3f46; padding-top: 20px;">
+                                O seu tempo de aluguel de 7 dias já começou a contar. Bom jogo e divirta-se!
+                            </p>
+                        </div>
+                        """
+                    }
+                    
+                    req_http = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+                    with urllib.request.urlopen(req_http) as response:
+                        print(f"✅ Email VIP de Reserva disparado para {email_cliente} com sucesso!")
+            except Exception as e:
+                print(f"❌ Erro ao enviar email de reserva: {e}")
+                pass # Ignora o erro de e-mail para não quebrar a API
+
         else:
+            # Ninguém na fila, volta pra vitrine
             cursor.execute("UPDATE contas_psn SET status = 'DISPONIVEL' WHERE id = %s", (dados.conta_psn_id,))
             mensagem = "Senha alterada! A conta agora está DISPONÍVEL na vitrine."
-        conn.commit()
+            conn.commit()
+
         return {"mensagem": mensagem}
     except Exception as e:
         conn.rollback(); raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close(); conn.close()
+
 
 @app.delete("/jogos/{jogo_id}")
 def deletar_jogo(jogo_id: int, admin_data = Depends(verificar_admin)):
@@ -703,14 +743,12 @@ def revogar_locacao_admin(locacao_id: int, admin_data = Depends(verificar_admin)
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Puxa os dados da locação
         cursor.execute("SELECT conta_psn_id, status FROM locacoes WHERE id = %s", (locacao_id,))
         loc = cursor.fetchone()
         
         if not loc or loc['status'] != 'ATIVA':
             raise HTTPException(status_code=400, detail="Locação não encontrada ou já expirada.")
         
-        # Encerra a locação no momento exato e joga para Manutenção
         cursor.execute("UPDATE locacoes SET status = 'EXPIRADA', data_fim = CURRENT_TIMESTAMP WHERE id = %s", (locacao_id,))
         cursor.execute("UPDATE contas_psn SET status = 'MANUTENCAO' WHERE id = %s", (loc['conta_psn_id'],))
         conn.commit()
@@ -806,5 +844,4 @@ def verificar_alugueis_vencidos():
 def iniciar_relogio():
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
-
     scheduler.start()
