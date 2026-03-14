@@ -15,6 +15,8 @@ import requests # NOVO: Para conversar com o Asaas
 import socket
 import smtplib
 from email.mime.text import MIMEText
+import urllib.request
+import json
 
 # --- CLASSE MÁGICA 100% BLINDADA (IPV4) ---
 class SMTP_IPv4(smtplib.SMTP):
@@ -260,22 +262,41 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     
     try:
         remetente = os.getenv("EMAIL_REMETENTE")
-        senha_app = os.getenv("EMAIL_SENHA_APP")
+        chave_api = os.getenv("BREVO_API_KEY")
         
-        texto_email = f"Olá, {usuario['nome']}!\n\nSua nova senha temporária para acessar a Bora Jogar é: {nova_senha}\n\nRecomendamos que você altere esta senha no seu Painel do Cliente logo após o login."
-        msg = MIMEText(texto_email)
-        msg['Subject'] = 'Bora Jogar - Recuperação de Senha'
-        msg['From'] = f"Equipe Bora Jogar <{remetente}>"
-        msg['To'] = req.email
+        url = "https://api.brevo.com/v3/smtp/email"
+        headers = {
+            "accept": "application/json",
+            "api-key": chave_api,
+            "content-type": "application/json"
+        }
         
-        # Usando a classe que força a estrada antiga (IPv4) com a porta TLS
-        with SMTP_IPv4('smtp.gmail.com', 587, timeout=15) as smtp:
-            smtp.starttls() # Ativa a criptografia de segurança
-            smtp.login(remetente, senha_app)
-            smtp.send_message(msg)
+        # O Envelope Digital do Brevo
+        payload = {
+            "sender": {"name": "Equipe Bora Jogar", "email": remetente},
+            "to": [{"email": req.email}],
+            "subject": "Bora Jogar - Recuperação de Senha",
+            "htmlContent": f"""
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                <h2 style="color: #2563eb;">BORA JOGAR! 🎮</h2>
+                <p>Olá, <strong>{usuario['nome']}</strong>!</p>
+                <p>Sua nova senha temporária para acessar a loja é:</p>
+                <div style="background-color: #f4f4f5; padding: 15px; text-align: center; border-radius: 8px; font-size: 24px; letter-spacing: 5px; font-weight: bold; color: #18181b; margin: 20px 0;">
+                    {nova_senha}
+                </div>
+                <p>Recomendamos que você altere esta senha na aba <strong>Segurança da Conta</strong> no seu painel logo após o login.</p>
+                <p style="color: #71717a; font-size: 12px; margin-top: 30px;">Se você não solicitou esta senha, ignore este e-mail.</p>
+            </div>
+            """
+        }
+        
+        # Dispara o e-mail pela via expressa (HTTPS) escapando do bloqueio do Render
+        req_http = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+        with urllib.request.urlopen(req_http) as response:
+            print("✅ Email enviado via API do Brevo com sucesso!")
             
     except Exception as e:
-        print(f"Erro ao enviar email: {e}")
+        print(f"❌ Erro na API de Email: {e}")
         pass
     finally:
         cursor.close(); conn.close()
