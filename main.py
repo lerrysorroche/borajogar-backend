@@ -694,7 +694,7 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
                             </div>
                             
                             <div style="text-align: center; margin: 40px 0;">
-                                <a href="https://SEUSITE.vercel.app" style="background-color: #2563eb; color: white; padding: 16px 32px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 16px; display: inline-block;">🔑 Acessar Meu Jogo Agora</a>
+                                <a href="www.locadoraborajogar.com.br" style="background-color: #2563eb; color: white; padding: 16px 32px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 16px; display: inline-block;">🔑 Acessar Meu Jogo Agora</a>
                             </div>
                             
                             <p style="color: #71717a; font-size: 13px; text-align: center; margin-top: 40px; border-top: 1px solid #3f3f46; padding-top: 20px;">
