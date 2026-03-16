@@ -67,14 +67,13 @@ def gerar_codigo_convite(nome):
     return f"{letras}{nums}"
 
 class UsuarioNovo(BaseModel): nome: str; email: str; senha: str; telefone: str; codigo_indicacao: str = ""
-# 👇 AQUI: Adicionado o preco_aluguel_14
 class JogoNovo(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = ""; tempo_jogo: str = ""; nota: float = 0.0
 class ContaPSNNova(BaseModel): jogo_id: int; email_login: str; senha_login: str; mfa_secret: str = "" 
 class NovaLocacao(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int
 class LoginRequest(BaseModel): email: str; senha: str
 class EsqueciSenhaRequest(BaseModel): email: str
 class MudarSenhaRequest(BaseModel): utilizador_id: int; senha_atual: str; nova_senha: str
-class NovaReserva(BaseModel): utilizador_id: int; jogo_id: int
+class NovaReserva(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int = 7 # <-- adicione o dias_aluguel aqui!
 class NovaRecarga(BaseModel): utilizador_id: int; valor: float; cupom: str = ""
 class NovoCupom(BaseModel): codigo: str; tipo: str; valor: float
 class ResetSenhaRequest(BaseModel): conta_psn_id: int; nova_senha: str
@@ -470,16 +469,21 @@ def entrar_fila(reserva: NovaReserva):
     try:
         cursor.execute("SELECT id FROM fila_espera WHERE utilizador_id = %s AND jogo_id = %s AND status = 'AGUARDANDO'", (reserva.utilizador_id, reserva.jogo_id))
         if cursor.fetchone(): raise HTTPException(status_code=400, detail="Você já está na fila de espera para este jogo!")
-        cursor.execute("SELECT titulo, preco_aluguel FROM jogos WHERE id = %s", (reserva.jogo_id,))
+        
+        # Puxa os dois preços do banco
+        cursor.execute("SELECT titulo, preco_aluguel, preco_aluguel_14 FROM jogos WHERE id = %s", (reserva.jogo_id,))
         jogo_info = cursor.fetchone()
-        preco = jogo_info['preco_aluguel']
+        
+        # O PYTHON DECIDE O PREÇO BASEADO NOS DIAS:
+        preco = jogo_info['preco_aluguel_14'] if reserva.dias_aluguel == 14 else jogo_info['preco_aluguel']
         titulo = jogo_info['titulo']
+        
         cursor.execute("SELECT saldo FROM utilizadores WHERE id = %s", (reserva.utilizador_id,))
         saldo = cursor.fetchone()['saldo']
         if saldo < preco: raise HTTPException(status_code=402, detail=f"Saldo insuficiente.")
         cursor.execute("UPDATE utilizadores SET saldo = saldo - %s WHERE id = %s", (preco, reserva.utilizador_id))
         cursor.execute("INSERT INTO fila_espera (utilizador_id, jogo_id) VALUES (%s, %s)", (reserva.utilizador_id, reserva.jogo_id))
-        cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (reserva.utilizador_id, preco, f"Reserva na Fila: {titulo}"))
+        cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (reserva.utilizador_id, preco, f"Reserva na Fila ({reserva.dias_aluguel}d): {titulo}"))
         conn.commit()
         return {"mensagem": "Reserva confirmada! Valor descontado da sua carteira."}
     except Exception as e:
@@ -494,10 +498,14 @@ def realizar_locacao(locacao: NovaLocacao):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor) 
     try:
-        cursor.execute("SELECT titulo, preco_aluguel FROM jogos WHERE id = %s", (locacao.jogo_id,))
+        # Puxa os dois preços do banco
+        cursor.execute("SELECT titulo, preco_aluguel, preco_aluguel_14 FROM jogos WHERE id = %s", (locacao.jogo_id,))
         jogo_info = cursor.fetchone()
-        preco = jogo_info['preco_aluguel']
+        
+        # O PYTHON DECIDE O PREÇO BASEADO NOS DIAS:
+        preco = jogo_info['preco_aluguel_14'] if locacao.dias_aluguel == 14 else jogo_info['preco_aluguel']
         titulo = jogo_info['titulo']
+        
         cursor.execute("SELECT saldo FROM utilizadores WHERE id = %s", (locacao.utilizador_id,))
         saldo = cursor.fetchone()['saldo']
         if saldo < preco: raise HTTPException(status_code=402, detail=f"Saldo insuficiente.")
@@ -509,7 +517,7 @@ def realizar_locacao(locacao: NovaLocacao):
         query_recibo = "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA') RETURNING id, data_fim;"
         cursor.execute(query_recibo, (locacao.utilizador_id, conta['id'], locacao.dias_aluguel))
         recibo = cursor.fetchone()
-        cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (locacao.utilizador_id, preco, f"Aluguel: {titulo}"))
+        cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (locacao.utilizador_id, preco, f"Aluguel ({locacao.dias_aluguel}d): {titulo}"))
         conn.commit() 
         return {"mensagem": "Aluguel realizado! Valor descontado.", "pedido_id": recibo['id'], "data_devolucao": recibo['data_fim'], "psn_email": conta['email_login'], "psn_senha": conta['senha_login']}
     except Exception as e:
