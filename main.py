@@ -67,7 +67,8 @@ def gerar_codigo_convite(nome):
     return f"{letras}{nums}"
 
 class UsuarioNovo(BaseModel): nome: str; email: str; senha: str; telefone: str; codigo_indicacao: str = ""
-class JogoNovo(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; descricao: str; url_imagem: str = ""; tempo_jogo: str = ""; nota: float = 0.0
+# 👇 AQUI: Adicionado o preco_aluguel_14
+class JogoNovo(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = ""; tempo_jogo: str = ""; nota: float = 0.0
 class ContaPSNNova(BaseModel): jogo_id: int; email_login: str; senha_login: str; mfa_secret: str = "" 
 class NovaLocacao(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int
 class LoginRequest(BaseModel): email: str; senha: str
@@ -119,9 +120,10 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        query = """INSERT INTO jogos (titulo, plataforma, preco_aluguel, descricao, url_imagem, tempo_jogo, nota) 
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;"""
-        cursor.execute(query, (jogo.titulo, jogo.plataforma, jogo.preco_aluguel, jogo.descricao, jogo.url_imagem, jogo.tempo_jogo, jogo.nota))
+        # 👇 AQUI: Adicionado o preco_aluguel_14 no INSERT do banco
+        query = """INSERT INTO jogos (titulo, plataforma, preco_aluguel, preco_aluguel_14, descricao, url_imagem, tempo_jogo, nota) 
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;"""
+        cursor.execute(query, (jogo.titulo, jogo.plataforma, jogo.preco_aluguel, jogo.preco_aluguel_14, jogo.descricao, jogo.url_imagem, jogo.tempo_jogo, jogo.nota))
         conn.commit()
         return {"mensagem": "Jogo adicionado com sucesso!"}
     except Exception as e:
@@ -134,7 +136,8 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
 def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.descricao, j.url_imagem, j.tempo_jogo, j.nota,
+    # 👇 AQUI: Adicionado o j.preco_aluguel_14 na busca
+    query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota,
             (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
             (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
             (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
