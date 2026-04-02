@@ -82,6 +82,7 @@ class AjusteSaldoRequest(BaseModel): utilizador_id: int; valor: float; motivo: s
 class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; anuncio_ativo: bool; mensagem_anuncio: str
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
 class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float; preco_aluguel_14: float = 0.0
+class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0
 
 @app.get("/")
 def home(): return {"mensagem": "API Online"}
@@ -819,19 +820,30 @@ def cadastrar_conta_psn(conta: ContaPSNNova, admin_data = Depends(verificar_admi
     finally:
         cursor.close(); conn.close()
 
-@app.patch("/jogos/{jogo_id}/preco")
-def atualizar_preco_jogo(jogo_id: int, dados: EditarPrecoJogoRequest, admin_data = Depends(verificar_admin)):
+@app.put("/jogos/{jogo_id}")
+def editar_jogo_completo(jogo_id: int, dados: EditarJogoRequest, admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("UPDATE jogos SET preco_aluguel = %s, preco_aluguel_14 = %s WHERE id = %s", (dados.preco_aluguel, dados.preco_aluguel_14, jogo_id))
+        query = """
+            UPDATE jogos 
+            SET titulo = %s, plataforma = %s, preco_aluguel = %s, preco_aluguel_14 = %s, 
+                descricao = %s, url_imagem = %s, tempo_jogo = %s, nota = %s
+            WHERE id = %s
+        """
+        cursor.execute(query, (
+            dados.titulo, dados.plataforma, dados.preco_aluguel, dados.preco_aluguel_14, 
+            dados.descricao, dados.url_imagem, dados.tempo_jogo, dados.nota, jogo_id
+        ))
+        
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Jogo não encontrado.")
+            
         conn.commit()
-        return {"mensagem": "Preços atualizados com sucesso!"}
+        return {"mensagem": "Jogo atualizado com sucesso!"}
     except Exception as e:
         conn.rollback()
-        raise HTTPException(status_code=400, detail="Erro ao atualizar preço.")
+        raise HTTPException(status_code=400, detail="Erro ao atualizar as informações do jogo.")
     finally:
         cursor.close(); conn.close()
 
