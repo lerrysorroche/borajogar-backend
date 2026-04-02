@@ -79,7 +79,7 @@ class NovoCupom(BaseModel): codigo: str; tipo: str; valor: float
 class ResetSenhaRequest(BaseModel): conta_psn_id: int; nova_senha: str
 class AplicarMultaRequest(BaseModel): utilizador_id: int; valor: float = 50.0
 class AjusteSaldoRequest(BaseModel): utilizador_id: int; valor: float; motivo: str
-class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; anuncio_ativo: bool; mensagem_anuncio: str
+class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; anuncio_ativo: bool; mensagem_anuncio: str; banners_url: str = ""
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
 class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float; preco_aluguel_14: float = 0.0
 class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0
@@ -91,10 +91,11 @@ def home(): return {"mensagem": "API Online"}
 def get_config():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio FROM configuracoes LIMIT 1")
+    # Adicione o banners_url no SELECT
+    cursor.execute("SELECT devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url FROM configuracoes LIMIT 1")
     config = cursor.fetchone()
     cursor.close(); conn.close()
-    return config if config else {"devolucao_dinamica": False, "valor_por_dia": 2.0, "anuncio_ativo": False, "mensagem_anuncio": ""}
+    return config if config else {"devolucao_dinamica": False, "valor_por_dia": 2.0, "anuncio_ativo": False, "mensagem_anuncio": "", "banners_url": ""}
 
 @app.post("/admin/configuracoes")
 def set_config(dados: ConfigRequest, admin_data = Depends(verificar_admin)):
@@ -102,15 +103,17 @@ def set_config(dados: ConfigRequest, admin_data = Depends(verificar_admin)):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM configuracoes LIMIT 1")
     if cursor.fetchone():
+        # Adicione o banners_url no UPDATE
         cursor.execute("""
             UPDATE configuracoes 
-            SET devolucao_dinamica = %s, valor_por_dia = %s, anuncio_ativo = %s, mensagem_anuncio = %s
-        """, (dados.devolucao_dinamica, dados.valor_por_dia, dados.anuncio_ativo, dados.mensagem_anuncio))
+            SET devolucao_dinamica = %s, valor_por_dia = %s, anuncio_ativo = %s, mensagem_anuncio = %s, banners_url = %s
+        """, (dados.devolucao_dinamica, dados.valor_por_dia, dados.anuncio_ativo, dados.mensagem_anuncio, dados.banners_url))
     else:
+        # E no INSERT
         cursor.execute("""
-            INSERT INTO configuracoes (devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio)
-            VALUES (%s, %s, %s, %s)
-        """, (dados.devolucao_dinamica, dados.valor_por_dia, dados.anuncio_ativo, dados.mensagem_anuncio))
+            INSERT INTO configuracoes (devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (dados.devolucao_dinamica, dados.valor_por_dia, dados.anuncio_ativo, dados.mensagem_anuncio, dados.banners_url))
         
     conn.commit(); cursor.close(); conn.close()
     return {"mensagem": "Configurações salvas!"}
