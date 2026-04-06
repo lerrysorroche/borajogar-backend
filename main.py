@@ -66,14 +66,15 @@ def gerar_codigo_convite(nome):
     nums = "".join(random.choices(string.digits, k=4))
     return f"{letras}{nums}"
 
+# 👇 ADICIONADO data_lancamento
 class UsuarioNovo(BaseModel): nome: str; email: str; senha: str; telefone: str; codigo_indicacao: str = ""
-class JogoNovo(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = ""; tempo_jogo: str = ""; nota: float = 0.0
+class JogoNovo(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = ""; tempo_jogo: str = ""; nota: float = 0.0; data_lancamento: str = None
 class ContaPSNNova(BaseModel): jogo_id: int; email_login: str; senha_login: str; mfa_secret: str = "" 
 class NovaLocacao(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int
 class LoginRequest(BaseModel): email: str; senha: str
 class EsqueciSenhaRequest(BaseModel): email: str
 class MudarSenhaRequest(BaseModel): utilizador_id: int; senha_atual: str; nova_senha: str
-class NovaReserva(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int = 7 # <-- adicione o dias_aluguel aqui!
+class NovaReserva(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int = 7
 class NovaRecarga(BaseModel): utilizador_id: int; valor: float; cupom: str = ""
 class NovoCupom(BaseModel): codigo: str; tipo: str; valor: float
 class ResetSenhaRequest(BaseModel): conta_psn_id: int; nova_senha: str
@@ -82,7 +83,8 @@ class AjusteSaldoRequest(BaseModel): utilizador_id: int; valor: float; motivo: s
 class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; anuncio_ativo: bool; mensagem_anuncio: str; banners_url: str = ""
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
 class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float; preco_aluguel_14: float = 0.0
-class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0
+# 👇 ADICIONADO data_lancamento
+class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0; data_lancamento: str = None
 
 @app.get("/")
 def home(): return {"mensagem": "API Online"}
@@ -91,7 +93,6 @@ def home(): return {"mensagem": "API Online"}
 def get_config():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # Adicione o banners_url no SELECT
     cursor.execute("SELECT devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url FROM configuracoes LIMIT 1")
     config = cursor.fetchone()
     cursor.close(); conn.close()
@@ -103,13 +104,11 @@ def set_config(dados: ConfigRequest, admin_data = Depends(verificar_admin)):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM configuracoes LIMIT 1")
     if cursor.fetchone():
-        # Adicione o banners_url no UPDATE
         cursor.execute("""
             UPDATE configuracoes 
             SET devolucao_dinamica = %s, valor_por_dia = %s, anuncio_ativo = %s, mensagem_anuncio = %s, banners_url = %s
         """, (dados.devolucao_dinamica, dados.valor_por_dia, dados.anuncio_ativo, dados.mensagem_anuncio, dados.banners_url))
     else:
-        # E no INSERT
         cursor.execute("""
             INSERT INTO configuracoes (devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url)
             VALUES (%s, %s, %s, %s, %s)
@@ -123,15 +122,15 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # 👇 AQUI: Adicionado o preco_aluguel_14 no INSERT do banco
-        query = """INSERT INTO jogos (titulo, plataforma, preco_aluguel, preco_aluguel_14, descricao, url_imagem, tempo_jogo, nota) 
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;"""
-        cursor.execute(query, (jogo.titulo, jogo.plataforma, jogo.preco_aluguel, jogo.preco_aluguel_14, jogo.descricao, jogo.url_imagem, jogo.tempo_jogo, jogo.nota))
+        # 👇 ADICIONADO data_lancamento no INSERT
+        query = """INSERT INTO jogos (titulo, plataforma, preco_aluguel, preco_aluguel_14, descricao, url_imagem, tempo_jogo, nota, data_lancamento) 
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;"""
+        cursor.execute(query, (jogo.titulo, jogo.plataforma, jogo.preco_aluguel, jogo.preco_aluguel_14, jogo.descricao, jogo.url_imagem, jogo.tempo_jogo, jogo.nota, jogo.data_lancamento))
         conn.commit()
         return {"mensagem": "Jogo adicionado com sucesso!"}
     except Exception as e:
         conn.rollback()
-        raise HTTPException(status_code=400, detail="Erro ao cadastrar o jogo.")
+        raise HTTPException(status_code=400, detail=f"Erro ao cadastrar o jogo: {str(e)}")
     finally:
         cursor.close(); conn.close()
 
@@ -139,8 +138,8 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
 def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # 👇 AQUI: Adicionado o j.preco_aluguel_14 na busca
-    query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota,
+    # 👇 ADICIONADO data_lancamento no SELECT
+    query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
             (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
             (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
             (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
@@ -474,11 +473,9 @@ def entrar_fila(reserva: NovaReserva):
         cursor.execute("SELECT id FROM fila_espera WHERE utilizador_id = %s AND jogo_id = %s AND status = 'AGUARDANDO'", (reserva.utilizador_id, reserva.jogo_id))
         if cursor.fetchone(): raise HTTPException(status_code=400, detail="Você já está na fila de espera para este jogo!")
         
-        # Puxa os dois preços do banco
         cursor.execute("SELECT titulo, preco_aluguel, preco_aluguel_14 FROM jogos WHERE id = %s", (reserva.jogo_id,))
         jogo_info = cursor.fetchone()
         
-        # O PYTHON DECIDE O PREÇO BASEADO NOS DIAS:
         preco = jogo_info['preco_aluguel_14'] if reserva.dias_aluguel == 14 else jogo_info['preco_aluguel']
         titulo = jogo_info['titulo']
         
@@ -502,11 +499,9 @@ def realizar_locacao(locacao: NovaLocacao):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor) 
     try:
-        # Puxa os dois preços do banco
         cursor.execute("SELECT titulo, preco_aluguel, preco_aluguel_14 FROM jogos WHERE id = %s", (locacao.jogo_id,))
         jogo_info = cursor.fetchone()
         
-        # O PYTHON DECIDE O PREÇO BASEADO NOS DIAS:
         preco = jogo_info['preco_aluguel_14'] if locacao.dias_aluguel == 14 else jogo_info['preco_aluguel']
         titulo = jogo_info['titulo']
         
@@ -671,7 +666,7 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
             cursor.execute("SELECT titulo FROM jogos WHERE id = %s", (jogo_id,))
             jogo_fila = cursor.fetchone()
             
-            # SALVA TUDO NO BANCO DE DADOS AQUI (Para garantir que o jogo foi entregue mesmo se a internet cair)
+            # SALVA TUDO NO BANCO DE DADOS AQUI
             conn.commit()
 
             # --- DISPARO DE E-MAIL VIA BREVO ---
@@ -724,7 +719,7 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
                         print(f"✅ Email VIP de Reserva disparado para {email_cliente} com sucesso!")
             except Exception as e:
                 print(f"❌ Erro ao enviar email de reserva: {e}")
-                pass # Ignora o erro de e-mail para não quebrar a API
+                pass 
 
         else:
             # Ninguém na fila, volta pra vitrine
@@ -828,15 +823,16 @@ def editar_jogo_completo(jogo_id: int, dados: EditarJogoRequest, admin_data = De
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        # 👇 ADICIONADO data_lancamento no UPDATE
         query = """
             UPDATE jogos 
             SET titulo = %s, plataforma = %s, preco_aluguel = %s, preco_aluguel_14 = %s, 
-                descricao = %s, url_imagem = %s, tempo_jogo = %s, nota = %s
+                descricao = %s, url_imagem = %s, tempo_jogo = %s, nota = %s, data_lancamento = %s
             WHERE id = %s
         """
         cursor.execute(query, (
             dados.titulo, dados.plataforma, dados.preco_aluguel, dados.preco_aluguel_14, 
-            dados.descricao, dados.url_imagem, dados.tempo_jogo, dados.nota, jogo_id
+            dados.descricao, dados.url_imagem, dados.tempo_jogo, dados.nota, dados.data_lancamento, jogo_id
         ))
         
         if cursor.rowcount == 0:
