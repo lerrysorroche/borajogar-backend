@@ -66,7 +66,6 @@ def gerar_codigo_convite(nome):
     nums = "".join(random.choices(string.digits, k=4))
     return f"{letras}{nums}"
 
-# 👇 ADICIONADO data_lancamento
 class UsuarioNovo(BaseModel): nome: str; email: str; senha: str; telefone: str; codigo_indicacao: str = ""
 class JogoNovo(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = ""; tempo_jogo: str = ""; nota: float = 0.0; data_lancamento: str = None
 class ContaPSNNova(BaseModel): jogo_id: int; email_login: str; senha_login: str; mfa_secret: str = "" 
@@ -83,8 +82,11 @@ class AjusteSaldoRequest(BaseModel): utilizador_id: int; valor: float; motivo: s
 class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; anuncio_ativo: bool; mensagem_anuncio: str; banners_url: str = ""
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
 class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float; preco_aluguel_14: float = 0.0
-# 👇 ADICIONADO data_lancamento
 class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0; data_lancamento: str = None
+
+# Modelos da Enquete
+class NovaOpcaoEnquete(BaseModel): titulo: str; url_imagem: str
+class VotoEnquete(BaseModel): utilizador_id: int; opcao_id: int
 
 @app.get("/")
 def home(): return {"mensagem": "API Online"}
@@ -117,12 +119,91 @@ def set_config(dados: ConfigRequest, admin_data = Depends(verificar_admin)):
     conn.commit(); cursor.close(); conn.close()
     return {"mensagem": "Configurações salvas!"}
 
+# ==============================================================================
+# SISTEMA DE ENQUETE (POLL)
+# ==============================================================================
+
+@app.get("/enquete")
+def buscar_enquete(usuario_id: int = 0):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT o.id, o.titulo, o.url_imagem,
+               (SELECT COUNT(*) FROM enquete_votos v WHERE v.opcao_id = o.id) as total_votos
+        FROM enquete_opcoes o
+        ORDER BY o.id ASC
+    """)
+    opcoes = cursor.fetchall()
+    
+    voto_usuario = None
+    if usuario_id > 0:
+        cursor.execute("SELECT opcao_id FROM enquete_votos WHERE utilizador_id = %s", (usuario_id,))
+        voto = cursor.fetchone()
+        if voto:
+            voto_usuario = voto['opcao_id']
+            
+    cursor.close(); conn.close()
+    return {"opcoes": opcoes, "voto_usuario": voto_usuario}
+
+@app.post("/enquete/votar")
+def votar_enquete(voto: VotoEnquete):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO enquete_votos (utilizador_id, opcao_id)
+            VALUES (%s, %s)
+            ON CONFLICT (utilizador_id) 
+            DO UPDATE SET opcao_id = EXCLUDED.opcao_id;
+        """, (voto.utilizador_id, voto.opcao_id))
+        conn.commit()
+        return {"mensagem": "Voto registrado com sucesso!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close(); conn.close()
+
+@app.post("/admin/enquete", status_code=201)
+def adicionar_opcao_enquete(opcao: NovaOpcaoEnquete, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO enquete_opcoes (titulo, url_imagem) VALUES (%s, %s)", (opcao.titulo, opcao.url_imagem))
+        conn.commit()
+        return {"mensagem": "Opção adicionada à enquete!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close(); conn.close()
+
+@app.delete("/admin/enquete/{opcao_id}")
+def remover_opcao_enquete(opcao_id: int, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM enquete_opcoes WHERE id = %s", (opcao_id,))
+    conn.commit()
+    cursor.close(); conn.close()
+    return {"mensagem": "Opção removida da enquete."}
+
+@app.delete("/admin/enquete")
+def limpar_enquete_completa(admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM enquete_opcoes")
+    conn.commit()
+    cursor.close(); conn.close()
+    return {"mensagem": "Enquete reiniciada. Todos os jogos e votos foram apagados."}
+
+# ==============================================================================
+
 @app.post("/jogos", status_code=201)
 def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # 👇 ADICIONADO data_lancamento no INSERT
         query = """INSERT INTO jogos (titulo, plataforma, preco_aluguel, preco_aluguel_14, descricao, url_imagem, tempo_jogo, nota, data_lancamento) 
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;"""
         cursor.execute(query, (jogo.titulo, jogo.plataforma, jogo.preco_aluguel, jogo.preco_aluguel_14, jogo.descricao, jogo.url_imagem, jogo.tempo_jogo, jogo.nota, jogo.data_lancamento))
@@ -138,7 +219,6 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
 def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # 👇 ADICIONADO data_lancamento no SELECT
     query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
             (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
             (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
@@ -823,7 +903,6 @@ def editar_jogo_completo(jogo_id: int, dados: EditarJogoRequest, admin_data = De
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # 👇 ADICIONADO data_lancamento no UPDATE
         query = """
             UPDATE jogos 
             SET titulo = %s, plataforma = %s, preco_aluguel = %s, preco_aluguel_14 = %s, 
