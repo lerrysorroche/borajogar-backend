@@ -57,7 +57,6 @@ def verificar_admin(authorization: str = Header(None)):
     except Exception: raise HTTPException(status_code=401, detail="Token inválido.")
 
 def get_db_connection():
-    """Abre a porta com o Banco de Dados PostgreSQL na Nuvem."""
     DATABASE_URL = os.getenv("DATABASE_URL")
     return psycopg2.connect(DATABASE_URL)
 
@@ -83,11 +82,11 @@ class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; 
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
 class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float; preco_aluguel_14: float = 0.0
 class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0; data_lancamento: str = None
-class EditarClienteRequest(BaseModel): nome: str; email: str; telefone: str; saldo: float; motivo_ajuste: str = "Ajuste Administrativo"
-
-# Modelos da Enquete
 class NovaOpcaoEnquete(BaseModel): titulo: str; url_imagem: str
 class VotoEnquete(BaseModel): utilizador_id: int; opcao_id: int
+class EditarClienteRequest(BaseModel): nome: str; email: str; telefone: str; saldo: float; motivo_ajuste: str = "Ajuste Administrativo"
+class LerNotificacao(BaseModel): notificacao_id: int
+class CancelarReserva(BaseModel): reserva_id: int; utilizador_id: int; notificacao_id: int = 0
 
 @app.get("/")
 def home(): return {"mensagem": "API Online"}
@@ -119,10 +118,6 @@ def set_config(dados: ConfigRequest, admin_data = Depends(verificar_admin)):
         
     conn.commit(); cursor.close(); conn.close()
     return {"mensagem": "Configurações salvas!"}
-
-# ==============================================================================
-# SISTEMA DE ENQUETE (POLL)
-# ==============================================================================
 
 @app.get("/enquete")
 def buscar_enquete(usuario_id: int = 0):
@@ -196,9 +191,7 @@ def limpar_enquete_completa(admin_data = Depends(verificar_admin)):
     cursor.execute("DELETE FROM enquete_opcoes")
     conn.commit()
     cursor.close(); conn.close()
-    return {"mensagem": "Enquete reiniciada. Todos os jogos e votos foram apagados."}
-
-# ==============================================================================
+    return {"mensagem": "Enquete reiniciada."}
 
 @app.post("/jogos", status_code=201)
 def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
@@ -244,10 +237,43 @@ def buscar_alugueis_usuario(usuario_id: int):
 def buscar_reservas_usuario(usuario_id: int):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT f.id AS reserva_id, j.titulo AS jogo, f.data_solicitacao, f.status, (SELECT COUNT(*) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND f2.data_solicitacao < f.data_solicitacao) AS pessoas_na_frente, (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA') AS proxima_devolucao FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id WHERE f.utilizador_id = %s AND f.status = 'AGUARDANDO' ORDER BY f.data_solicitacao ASC;", (usuario_id,))
+    cursor.execute("""
+        SELECT f.id AS reserva_id, j.titulo AS jogo, f.data_solicitacao, f.status, 
+        (SELECT COUNT(*) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND (
+            (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f2.utilizador_id AND status = 'EXPIRADA') > 
+            (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA')
+            OR 
+            ((SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f2.utilizador_id AND status = 'EXPIRADA') = 
+             (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA')
+             AND f2.data_solicitacao < f.data_solicitacao)
+        )) AS pessoas_na_frente, 
+        (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA') AS proxima_devolucao 
+        FROM fila_espera f 
+        JOIN jogos j ON f.jogo_id = j.id 
+        WHERE f.utilizador_id = %s AND f.status = 'AGUARDANDO' 
+        ORDER BY f.data_solicitacao ASC;
+    """, (usuario_id,))
     resultados = cursor.fetchall()
     cursor.close(); conn.close()
     return resultados
+
+@app.get("/notificacoes/{usuario_id}")
+def buscar_notificacoes(usuario_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT id, reserva_id, jogo, mensagem, lida FROM notificacoes WHERE utilizador_id = %s AND lida = FALSE ORDER BY id DESC", (usuario_id,))
+    res = cursor.fetchall()
+    cursor.close(); conn.close()
+    return res
+
+@app.post("/notificacoes/ler")
+def ler_notificacao(dados: LerNotificacao):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE notificacoes SET lida = TRUE WHERE id = %s", (dados.notificacao_id,))
+    conn.commit()
+    cursor.close(); conn.close()
+    return {"status": "ok"}
 
 @app.get("/extrato/{usuario_id}")
 def buscar_extrato_usuario(usuario_id: int):
@@ -292,6 +318,35 @@ def cadastrar_usuario(usuario: UsuarioNovo):
     finally:
         cursor.close(); conn.close()
 
+@app.put("/usuarios/{usuario_id}")
+def editar_usuario(usuario_id: int, dados: EditarClienteRequest, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT saldo FROM utilizadores WHERE id = %s", (usuario_id,))
+        usuario_db = cursor.fetchone()
+        
+        if not usuario_db:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+            
+        saldo_atual = float(usuario_db['saldo'])
+        novo_saldo = float(dados.saldo)
+        
+        if saldo_atual != novo_saldo:
+            diferenca = novo_saldo - saldo_atual
+            tipo_transacao = "ENTRADA" if diferenca > 0 else "SAIDA"
+            motivo = dados.motivo_ajuste if dados.motivo_ajuste.strip() else "Ajuste Administrativo"
+            cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, %s, %s, %s)", (usuario_id, tipo_transacao, abs(diferenca), motivo))
+
+        cursor.execute("UPDATE utilizadores SET nome = %s, email = %s, telefone = %s, saldo = %s WHERE id = %s", (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id))
+        conn.commit()
+        return {"mensagem": "Cliente atualizado com sucesso!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close(); conn.close()
+
 @app.post("/login")
 def fazer_login(login: LoginRequest):
     conn = get_db_connection()
@@ -305,11 +360,6 @@ def fazer_login(login: LoginRequest):
     usuario['saldo'] = float(usuario['saldo'])
     return {"mensagem": "Login aprovado", "usuario": usuario, "token": token}
 
-
-# ==============================================================================
-# SENHA E E-MAIL (BREVO API)
-# ==============================================================================
-
 @app.post("/esqueci-senha")
 def esqueci_senha(req: EsqueciSenhaRequest):
     conn = get_db_connection()
@@ -317,7 +367,6 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     
     cursor.execute("SELECT id, nome FROM utilizadores WHERE email = %s", (req.email,))
     usuario = cursor.fetchone()
-    
     if not usuario:
         cursor.close(); conn.close()
         return {"mensagem": "Se este e-mail estiver cadastrado, uma nova senha foi enviada."}
@@ -326,61 +375,35 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     nova_senha = ''.join(random.choice(caracteres) for i in range(8))
     senha_hash = gerar_hash_senha(nova_senha)
     
-    print(f"🚨 SENHA DE RESGATE PARA {req.email}: {nova_senha} 🚨")
-    
     cursor.execute("UPDATE utilizadores SET senha_hash = %s WHERE email = %s", (senha_hash, req.email))
     conn.commit()
     
     try:
         remetente = os.getenv("EMAIL_REMETENTE")
         chave_api = os.getenv("BREVO_API_KEY")
-        
-        url = "https://api.brevo.com/v3/smtp/email"
-        headers = {
-            "accept": "application/json",
-            "api-key": chave_api,
-            "content-type": "application/json"
-        }
-        
-        payload = {
-            "sender": {"name": "Equipe Bora Jogar", "email": remetente},
-            "to": [{"email": req.email}],
-            "subject": "Bora Jogar - Recuperação de Senha",
-            "htmlContent": f"""
-            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
-                <h2 style="color: #2563eb;">BORA JOGAR! 🎮</h2>
-                <p>Olá, <strong>{usuario['nome']}</strong>!</p>
-                <p>Sua nova senha temporária para acessar a loja é:</p>
-                <div style="background-color: #f4f4f5; padding: 15px; text-align: center; border-radius: 8px; font-size: 24px; letter-spacing: 5px; font-weight: bold; color: #18181b; margin: 20px 0;">
-                    {nova_senha}
-                </div>
-                <p>Recomendamos que você altere esta senha na aba <strong>Segurança da Conta</strong> no seu painel logo após o login.</p>
-                <p style="color: #71717a; font-size: 12px; margin-top: 30px;">Se você não solicitou esta senha, ignore este e-mail.</p>
-            </div>
-            """
-        }
-        
-        req_http = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-        with urllib.request.urlopen(req_http) as response:
-            print("✅ Email enviado via API do Brevo com sucesso!")
-            
-    except Exception as e:
-        print(f"❌ Erro na API de Email: {e}")
-        pass
+        if chave_api and remetente:
+            url = "https://api.brevo.com/v3/smtp/email"
+            headers = {"accept": "application/json", "api-key": chave_api, "content-type": "application/json"}
+            payload = {
+                "sender": {"name": "Equipe Bora Jogar", "email": remetente},
+                "to": [{"email": req.email}],
+                "subject": "Bora Jogar - Recuperação de Senha",
+                "htmlContent": f"Sua nova senha é: {nova_senha}"
+            }
+            req_http = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+            with urllib.request.urlopen(req_http) as response: pass
+    except Exception: pass
     finally:
         cursor.close(); conn.close()
         
     return {"mensagem": "Se este e-mail estiver cadastrado, uma nova senha foi enviada."}
 
-
 @app.post("/mudar-senha")
 def mudar_senha(req: MudarSenhaRequest):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
     cursor.execute("SELECT senha_hash FROM utilizadores WHERE id = %s", (req.utilizador_id,))
     usuario = cursor.fetchone()
-    
     if not usuario or not verificar_senha(req.senha_atual, usuario['senha_hash']):
         cursor.close(); conn.close()
         raise HTTPException(status_code=400, detail="A senha atual está incorreta.")
@@ -388,14 +411,9 @@ def mudar_senha(req: MudarSenhaRequest):
     novo_hash = gerar_hash_senha(req.nova_senha)
     cursor.execute("UPDATE utilizadores SET senha_hash = %s WHERE id = %s", (novo_hash, req.utilizador_id))
     conn.commit()
-    
     cursor.close(); conn.close()
     return {"mensagem": "Senha alterada com sucesso!"}
 
-
-# ==============================================================================
-# MOTOR FINANCEIRO (Asaas PIX)
-# ==============================================================================
 @app.post("/recarga/gerar-pix")
 def gerar_pix_asaas(recarga: NovaRecarga):
     if recarga.valor < 15.0: raise HTTPException(status_code=400, detail="O valor mínimo de recarga é R$ 15,00.")
@@ -421,15 +439,13 @@ def gerar_pix_asaas(recarga: NovaRecarga):
         cursor.execute("SELECT nome, email FROM utilizadores WHERE id = %s", (recarga.utilizador_id,))
         usr = cursor.fetchone()
 
-        # 🚀 AGORA USAMOS O CPF REAL DO CLIENTE PARA BLINDAR SUA CONTA ASAAS
         payload_cli = {
             "name": usr['nome'], 
             "email": usr['email'],
             "cpfCnpj": recarga.cpf 
         }
         res_cli = requests.post(f"{ASAAS_URL}/customers", json=payload_cli, headers=HEADERS_ASAAS)
-        if res_cli.status_code not in [200, 201]: 
-            raise Exception(f"Erro Asaas (Cliente): {res_cli.text}")
+        if res_cli.status_code not in [200, 201]: raise Exception(f"Erro Asaas (Cliente): {res_cli.text}")
         cli_id = res_cli.json().get('id')
 
         vencimento = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -441,13 +457,11 @@ def gerar_pix_asaas(recarga: NovaRecarga):
             "description": "Recarga de Carteira - BORA JOGAR"
         }
         res_cob = requests.post(f"{ASAAS_URL}/payments", json=payload_cob, headers=HEADERS_ASAAS)
-        if res_cob.status_code not in [200, 201]: 
-            raise Exception(f"Erro Asaas (Cobrança): {res_cob.text}")
+        if res_cob.status_code not in [200, 201]: raise Exception(f"Erro Asaas (Cobrança): {res_cob.text}")
         pay_id = res_cob.json().get('id')
 
         res_qr = requests.get(f"{ASAAS_URL}/payments/{pay_id}/pixQrCode", headers=HEADERS_ASAAS)
-        if res_qr.status_code not in [200, 201]: 
-            raise Exception(f"Erro Asaas (QRCode): {res_qr.text}")
+        if res_qr.status_code not in [200, 201]: raise Exception(f"Erro Asaas (QRCode): {res_qr.text}")
         qr_data = res_qr.json()
 
         cupom_nome = recarga.cupom.upper() if recarga.cupom else ""
@@ -455,11 +469,7 @@ def gerar_pix_asaas(recarga: NovaRecarga):
                        (pay_id, recarga.utilizador_id, recarga.valor, valor_bonus_cupom, cupom_nome))
         conn.commit()
 
-        return {
-            "payment_id": pay_id,
-            "copia_cola": qr_data.get('payload'),
-            "qr_code": qr_data.get('encodedImage')
-        }
+        return {"payment_id": pay_id, "copia_cola": qr_data.get('payload'), "qr_code": qr_data.get('encodedImage')}
 
     except Exception as e:
         conn.rollback()
@@ -509,20 +519,14 @@ def checar_status_pagamento(payment_id: str):
 
                 cursor.execute("UPDATE pedidos_pix SET status = 'CONCLUIDO' WHERE id = %s", (payment_id,))
                 conn.commit()
-                
                 return {"status": "PAGO"}
 
         return {"status": "PENDENTE"}
-        
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close(); conn.close()
-
-# ==============================================================================
-# SISTEMA DE LOCAÇÃO, RESERVA E DEVOLUÇÃO
-# ==============================================================================
 
 @app.post("/devolver")
 def devolver_jogo(dados: DevolucaoRequest):
@@ -565,13 +569,61 @@ def entrar_fila(reserva: NovaReserva):
         saldo = cursor.fetchone()['saldo']
         if saldo < preco: raise HTTPException(status_code=402, detail=f"Saldo insuficiente.")
         cursor.execute("UPDATE utilizadores SET saldo = saldo - %s WHERE id = %s", (preco, reserva.utilizador_id))
-        cursor.execute("INSERT INTO fila_espera (utilizador_id, jogo_id) VALUES (%s, %s)", (reserva.utilizador_id, reserva.jogo_id))
+        cursor.execute("INSERT INTO fila_espera (utilizador_id, jogo_id) VALUES (%s, %s) RETURNING id", (reserva.utilizador_id, reserva.jogo_id))
+        reserva_id = cursor.fetchone()['id']
         cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (reserva.utilizador_id, preco, f"Reserva na Fila ({reserva.dias_aluguel}d): {titulo}"))
+        
+        # 🚀 LÓGICA DO RANK 1 FURA-FILA E NOTIFICAÇÃO
+        cursor.execute("SELECT COUNT(*) as qtd FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA'", (reserva.utilizador_id,))
+        is_vip = cursor.fetchone()['qtd'] > 0
+        
+        if is_vip:
+            cursor.execute("""
+                SELECT f.id, f.utilizador_id
+                FROM fila_espera f 
+                WHERE f.jogo_id = %s AND f.status = 'AGUARDANDO' AND f.utilizador_id != %s
+                AND (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA') = 0
+            """, (reserva.jogo_id, reserva.utilizador_id))
+            bumped = cursor.fetchall()
+            for b in bumped:
+                msg = f"Devido à prioridade de clientes Veteranos (Rank 1), a data prevista para a liberação do seu jogo {titulo} sofreu alterações."
+                cursor.execute("INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)", (b['utilizador_id'], b['id'], titulo, msg))
+
         conn.commit()
         return {"mensagem": "Reserva confirmada! Valor descontado da sua carteira."}
     except Exception as e:
         conn.rollback()
         if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close(); conn.close()
+
+@app.post("/reservas/cancelar")
+def cancelar_reserva(dados: CancelarReserva):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT f.jogo_id, j.titulo FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id WHERE f.id = %s AND f.utilizador_id = %s AND f.status = 'AGUARDANDO'", (dados.reserva_id, dados.utilizador_id))
+        res = cursor.fetchone()
+        if not res: raise HTTPException(status_code=400, detail="Reserva não encontrada.")
+
+        cursor.execute("SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1", (dados.utilizador_id, f"Reserva na Fila%:{res['titulo']}%"))
+        trans = cursor.fetchone()
+        reembolso = trans['valor'] if trans else 0.0
+
+        if reembolso > 0:
+            cursor.execute("UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s", (reembolso, dados.utilizador_id))
+            cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)", (dados.utilizador_id, reembolso, f"💸 Estorno de Reserva: {res['titulo']}"))
+
+        cursor.execute("DELETE FROM fila_espera WHERE id = %s", (dados.reserva_id,))
+        
+        if dados.notificacao_id > 0:
+            cursor.execute("UPDATE notificacoes SET lida = TRUE WHERE id = %s", (dados.notificacao_id,))
+        
+        conn.commit()
+        return {"mensagem": "Reserva cancelada e valor estornado para sua carteira!"}
+    except Exception as e:
+        conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close(); conn.close()
@@ -607,10 +659,6 @@ def realizar_locacao(locacao: NovaLocacao):
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close(); conn.close()
-
-# ==============================================================================
-# PAINEL DE ADMIN (ESTATÍSTICAS, JOGOS, MULTAS E FILAS)
-# ==============================================================================
 
 @app.get("/admin/estatisticas")
 def buscar_estatisticas_admin(admin_data = Depends(verificar_admin)):
@@ -708,11 +756,6 @@ def ajustar_saldo_manual(dados: AjusteSaldoRequest, admin_data = Depends(verific
     finally:
         cursor.close(); conn.close()
 
-
-# ==============================================================================
-# A ROTA MÁGICA: LIBERANDO CONTA E MANDANDO E-MAIL PRA FILA DE ESPERA
-# ==============================================================================
-
 @app.post("/admin/reset-senha")
 def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
@@ -721,7 +764,6 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
         cursor.execute("UPDATE contas_psn SET senha_login = %s WHERE id = %s RETURNING jogo_id", (dados.nova_senha, dados.conta_psn_id))
         jogo_id = cursor.fetchone()['jogo_id']
 
-        # Regra de Cashback para quem devolveu
         cursor.execute("SELECT id, utilizador_id, cashback_pendente FROM locacoes WHERE conta_psn_id = %s ORDER BY data_fim DESC LIMIT 1", (dados.conta_psn_id,))
         ultima_loc = cursor.fetchone()
         if ultima_loc and ultima_loc['cashback_pendente'] > 0:
@@ -731,80 +773,24 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
             cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, '♻️ Cashback Devolução Antecipada')", (usr, cash))
             cursor.execute("UPDATE locacoes SET cashback_pendente = 0 WHERE id = %s", (ultima_loc['id'],))
 
-        # Checa se existe alguém na fila
-        cursor.execute("SELECT id, utilizador_id FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' ORDER BY data_solicitacao ASC LIMIT 1", (jogo_id,))
+        # 🚀 LÓGICA DE SELEÇÃO BASEADA EM RANK
+        cursor.execute("""
+            SELECT id, utilizador_id FROM fila_espera 
+            WHERE jogo_id = %s AND status = 'AGUARDANDO' 
+            ORDER BY 
+              (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC, 
+              data_solicitacao ASC 
+            LIMIT 1
+        """, (jogo_id,))
         proximo_da_fila = cursor.fetchone()
         
         if proximo_da_fila:
-            # Transfere a conta pro sortudo
             cursor.execute("INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + 7 * INTERVAL '1 day', 'ATIVA')", (proximo_da_fila['utilizador_id'], dados.conta_psn_id))
             cursor.execute("UPDATE fila_espera SET status = 'CONCLUIDO' WHERE id = %s", (proximo_da_fila['id'],))
             cursor.execute("UPDATE contas_psn SET status = 'ALUGADA' WHERE id = %s", (dados.conta_psn_id,))
             mensagem = "Senha alterada! A conta foi entregue para o próximo da fila."
-            
-            # Puxa os dados para o E-mail antes de fechar a conexão
-            cursor.execute("SELECT nome, email FROM utilizadores WHERE id = %s", (proximo_da_fila['utilizador_id'],))
-            usr_fila = cursor.fetchone()
-            cursor.execute("SELECT titulo FROM jogos WHERE id = %s", (jogo_id,))
-            jogo_fila = cursor.fetchone()
-            
-            # SALVA TUDO NO BANCO DE DADOS AQUI
             conn.commit()
-
-            # --- DISPARO DE E-MAIL VIA BREVO ---
-            try:
-                nome_cliente = usr_fila['nome']
-                email_cliente = usr_fila['email']
-                nome_jogo = jogo_fila['titulo']
-                
-                remetente = os.getenv("EMAIL_REMETENTE")
-                chave_api = os.getenv("BREVO_API_KEY")
-                
-                if chave_api and remetente:
-                    url = "https://api.brevo.com/v3/smtp/email"
-                    headers = {
-                        "accept": "application/json",
-                        "api-key": chave_api,
-                        "content-type": "application/json"
-                    }
-                    
-                    payload = {
-                        "sender": {"name": "Equipe Bora Jogar", "email": remetente},
-                        "to": [{"email": email_cliente}],
-                        "subject": f"🎮 A espera acabou! Seu jogo {nome_jogo} está liberado!",
-                        "htmlContent": f"""
-                        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #3f3f46; border-radius: 15px; background-color: #18181b; color: #f4f4f5;">
-                            <div style="text-align: center; margin-bottom: 20px;">
-                                <h2 style="color: #34d399; margin: 0; font-size: 28px;">A FILA ANDOU! 🚀</h2>
-                            </div>
-                            
-                            <p style="font-size: 16px;">Olá, <strong>{nome_cliente}</strong>!</p>
-                            <p style="font-size: 16px; line-height: 1.5;">Temos ótimas notícias! A sua reserva chegou ao fim e a sua cópia do jogo <strong style="color: #60a5fa;">{nome_jogo}</strong> acabou de ser ativada na sua conta.</p>
-                            
-                            <div style="background-color: #27272a; padding: 20px; border-radius: 10px; margin: 30px 0; text-align: center; border-left: 4px solid #34d399;">
-                                <p style="margin: 0; font-size: 15px; color: #a1a1aa;">O E-mail, a Senha da PSN e o seu gerador de 2FA já estão esperando por você no seu painel.</p>
-                            </div>
-                            
-                            <div style="text-align: center; margin: 40px 0;">
-                                <a href="www.locadoraborajogar.com.br" style="background-color: #2563eb; color: white; padding: 16px 32px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 16px; display: inline-block;">🔑 Acessar Meu Jogo Agora</a>
-                            </div>
-                            
-                            <p style="color: #71717a; font-size: 13px; text-align: center; margin-top: 40px; border-top: 1px solid #3f3f46; padding-top: 20px;">
-                                O seu tempo de aluguel de 7 dias já começou a contar. Bom jogo e divirta-se!
-                            </p>
-                        </div>
-                        """
-                    }
-                    
-                    req_http = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-                    with urllib.request.urlopen(req_http) as response:
-                        print(f"✅ Email VIP de Reserva disparado para {email_cliente} com sucesso!")
-            except Exception as e:
-                print(f"❌ Erro ao enviar email de reserva: {e}")
-                pass 
-
         else:
-            # Ninguém na fila, volta pra vitrine
             cursor.execute("UPDATE contas_psn SET status = 'DISPONIVEL' WHERE id = %s", (dados.conta_psn_id,))
             mensagem = "Senha alterada! A conta agora está DISPONÍVEL na vitrine."
             conn.commit()
@@ -814,7 +800,6 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
         conn.rollback(); raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close(); conn.close()
-
 
 @app.delete("/jogos/{jogo_id}")
 def deletar_jogo(jogo_id: int, admin_data = Depends(verificar_admin)):
@@ -837,14 +822,10 @@ def revogar_locacao_admin(locacao_id: int, admin_data = Depends(verificar_admin)
     try:
         cursor.execute("SELECT conta_psn_id, status FROM locacoes WHERE id = %s", (locacao_id,))
         loc = cursor.fetchone()
-        
-        if not loc or loc['status'] != 'ATIVA':
-            raise HTTPException(status_code=400, detail="Locação não encontrada ou já expirada.")
-        
+        if not loc or loc['status'] != 'ATIVA': raise HTTPException(status_code=400, detail="Locação não encontrada ou já expirada.")
         cursor.execute("UPDATE locacoes SET status = 'EXPIRADA', data_fim = CURRENT_TIMESTAMP WHERE id = %s", (locacao_id,))
         cursor.execute("UPDATE contas_psn SET status = 'MANUTENCAO' WHERE id = %s", (loc['conta_psn_id'],))
         conn.commit()
-        
         return {"mensagem": "Locação revogada! A conta foi enviada para manutenção."}
     except Exception as e:
         conn.rollback()
@@ -911,14 +892,8 @@ def editar_jogo_completo(jogo_id: int, dados: EditarJogoRequest, admin_data = De
                 descricao = %s, url_imagem = %s, tempo_jogo = %s, nota = %s, data_lancamento = %s
             WHERE id = %s
         """
-        cursor.execute(query, (
-            dados.titulo, dados.plataforma, dados.preco_aluguel, dados.preco_aluguel_14, 
-            dados.descricao, dados.url_imagem, dados.tempo_jogo, dados.nota, dados.data_lancamento, jogo_id
-        ))
-        
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Jogo não encontrado.")
-            
+        cursor.execute(query, (dados.titulo, dados.plataforma, dados.preco_aluguel, dados.preco_aluguel_14, dados.descricao, dados.url_imagem, dados.tempo_jogo, dados.nota, dados.data_lancamento, jogo_id))
+        if cursor.rowcount == 0: raise HTTPException(status_code=404, detail="Jogo não encontrado.")
         conn.commit()
         return {"mensagem": "Jogo atualizado com sucesso!"}
     except Exception as e:
@@ -926,48 +901,6 @@ def editar_jogo_completo(jogo_id: int, dados: EditarJogoRequest, admin_data = De
         raise HTTPException(status_code=400, detail="Erro ao atualizar as informações do jogo.")
     finally:
         cursor.close(); conn.close()
-
-@app.put("/usuarios/{usuario_id}")
-def editar_usuario(usuario_id: int, dados: EditarClienteRequest, admin_data = Depends(verificar_admin)):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    try:
-        # 1. Busca o saldo atual do cliente para comparar
-        cursor.execute("SELECT saldo FROM utilizadores WHERE id = %s", (usuario_id,))
-        usuario_db = cursor.fetchone()
-        
-        if not usuario_db:
-            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-            
-        saldo_atual = float(usuario_db['saldo'])
-        novo_saldo = float(dados.saldo)
-        
-        # 2. Se o saldo foi alterado, grava no extrato (transacoes)
-        if saldo_atual != novo_saldo:
-            diferenca = novo_saldo - saldo_atual
-            tipo_transacao = "ENTRADA" if diferenca > 0 else "SAIDA"
-            motivo = dados.motivo_ajuste if dados.motivo_ajuste.strip() else "Ajuste Administrativo"
-            
-            cursor.execute(
-                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, %s, %s, %s)", 
-                (usuario_id, tipo_transacao, abs(diferenca), motivo)
-            )
-
-        # 3. Atualiza os dados cadastrais e o novo saldo
-        cursor.execute("""
-            UPDATE utilizadores 
-            SET nome = %s, email = %s, telefone = %s, saldo = %s 
-            WHERE id = %s
-        """, (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id))
-            
-        conn.commit()
-        return {"mensagem": "Cliente atualizado com sucesso!"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
 
 def verificar_alugueis_vencidos():
     conn = get_db_connection()
@@ -986,7 +919,25 @@ def verificar_alugueis_vencidos():
         cursor.close(); conn.close()
 
 @app.on_event("startup")
-def iniciar_relogio():
+def iniciar_servicos():
+    # 🚀 CRIA A TABELA DE NOTIFICAÇÕES AUTOMATICAMENTE SE NÃO EXISTIR
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notificacoes (
+            id SERIAL PRIMARY KEY,
+            utilizador_id INT,
+            reserva_id INT,
+            jogo VARCHAR(255),
+            mensagem TEXT,
+            lida BOOLEAN DEFAULT FALSE,
+            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
     scheduler.start()
