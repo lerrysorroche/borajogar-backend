@@ -83,6 +83,7 @@ class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; 
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
 class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float; preco_aluguel_14: float = 0.0
 class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0; data_lancamento: str = None
+class EditarClienteRequest(BaseModel): nome: str; email: str; telefone: str; saldo: float
 
 # Modelos da Enquete
 class NovaOpcaoEnquete(BaseModel): titulo: str; url_imagem: str
@@ -924,6 +925,29 @@ def editar_jogo_completo(jogo_id: int, dados: EditarJogoRequest, admin_data = De
         raise HTTPException(status_code=400, detail="Erro ao atualizar as informações do jogo.")
     finally:
         cursor.close(); conn.close()
+
+@app.put("/usuarios/{usuario_id}")
+def editar_usuario(usuario_id: int, dados: EditarClienteRequest, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE utilizadores 
+            SET nome = %s, email = %s, telefone = %s, saldo = %s 
+            WHERE id = %s
+        """, (dados.nome, dados.email, dados.telefone, dados.saldo, usuario_id))
+        
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+            
+        conn.commit()
+        return {"mensagem": "Cliente atualizado com sucesso!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 def verificar_alugueis_vencidos():
     conn = get_db_connection()
