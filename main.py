@@ -83,7 +83,7 @@ class ConfigRequest(BaseModel): devolucao_dinamica: bool; valor_por_dia: float; 
 class DevolucaoRequest(BaseModel): locacao_id: int; utilizador_id: int
 class EditarPrecoJogoRequest(BaseModel): preco_aluguel: float; preco_aluguel_14: float = 0.0
 class EditarJogoRequest(BaseModel): titulo: str; plataforma: str; preco_aluguel: float; preco_aluguel_14: float = 0.0; descricao: str; url_imagem: str = "";tempo_jogo: str = ""; nota: float = 0.0; data_lancamento: str = None
-class EditarClienteRequest(BaseModel): nome: str; email: str; telefone: str; saldo: float
+class EditarClienteRequest(BaseModel): nome: str; email: str; telefone: str; saldo: float; motivo_ajuste: str = "Ajuste Administrativo"
 
 # Modelos da Enquete
 class NovaOpcaoEnquete(BaseModel): titulo: str; url_imagem: str
@@ -929,16 +929,35 @@ def editar_jogo_completo(jogo_id: int, dados: EditarJogoRequest, admin_data = De
 @app.put("/usuarios/{usuario_id}")
 def editar_usuario(usuario_id: int, dados: EditarClienteRequest, admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # 1. Busca o saldo atual do cliente para comparar
+        cursor.execute("SELECT saldo FROM utilizadores WHERE id = %s", (usuario_id,))
+        usuario_db = cursor.fetchone()
+        
+        if not usuario_db:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+            
+        saldo_atual = float(usuario_db['saldo'])
+        novo_saldo = float(dados.saldo)
+        
+        # 2. Se o saldo foi alterado, grava no extrato (transacoes)
+        if saldo_atual != novo_saldo:
+            diferenca = novo_saldo - saldo_atual
+            tipo_transacao = "ENTRADA" if diferenca > 0 else "SAIDA"
+            motivo = dados.motivo_ajuste if dados.motivo_ajuste.strip() else "Ajuste Administrativo"
+            
+            cursor.execute(
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, %s, %s, %s)", 
+                (usuario_id, tipo_transacao, abs(diferenca), motivo)
+            )
+
+        # 3. Atualiza os dados cadastrais e o novo saldo
         cursor.execute("""
             UPDATE utilizadores 
             SET nome = %s, email = %s, telefone = %s, saldo = %s 
             WHERE id = %s
-        """, (dados.nome, dados.email, dados.telefone, dados.saldo, usuario_id))
-        
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        """, (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id))
             
         conn.commit()
         return {"mensagem": "Cliente atualizado com sucesso!"}
