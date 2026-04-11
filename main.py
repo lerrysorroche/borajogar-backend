@@ -216,8 +216,8 @@ def listar_jogos():
     query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
             (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
             (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
-            (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
-            (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
+            (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS fila_dias_espera,
+            (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao
         FROM jogos j ORDER BY j.titulo ASC;"""
     cursor.execute(query)
     resultados = cursor.fetchall()
@@ -238,24 +238,37 @@ def buscar_reservas_usuario(usuario_id: int):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("""
-        SELECT f.id AS reserva_id, j.titulo AS jogo, f.data_solicitacao, f.status, 
-        (SELECT COUNT(*) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND (
-            (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f2.utilizador_id AND status = 'EXPIRADA') > 
-            (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA')
-            OR 
-            ((SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f2.utilizador_id AND status = 'EXPIRADA') = 
-             (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA')
-             AND f2.data_solicitacao < f.data_solicitacao)
-        )) AS pessoas_na_frente, 
-        (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA') AS proxima_devolucao 
-        FROM fila_espera f 
-        JOIN jogos j ON f.jogo_id = j.id 
-        WHERE f.utilizador_id = %s AND f.status = 'AGUARDANDO' 
-        ORDER BY f.data_solicitacao ASC;
+        SELECT f.id AS reserva_id, j.id AS jogo_id, j.titulo AS jogo, j.data_lancamento, f.data_solicitacao, f.status,
+        (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA') AS proxima_devolucao
+        FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id 
+        WHERE f.utilizador_id = %s AND f.status = 'AGUARDANDO' ORDER BY f.data_solicitacao ASC;
     """, (usuario_id,))
-    resultados = cursor.fetchall()
+    reservas = cursor.fetchall()
+
+    # 🚀 CALCULA A DATA EXATA BASEADO EM QUEM ESTÁ NA FRENTE
+    for r in reservas:
+        cursor.execute("""
+            SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
+            WHERE jogo_id = %s AND status = 'AGUARDANDO' AND (
+                (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') > 
+                (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA')
+                OR ((SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') = 
+                 (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA') AND data_solicitacao < %s)
+            )
+        """, (r['jogo_id'], usuario_id, usuario_id, r['data_solicitacao']))
+        dias_frente = cursor.fetchone()['dias_frente']
+
+        base_date = datetime.now()
+        if r['data_lancamento']:
+            dl = datetime.strptime(str(r['data_lancamento']), "%Y-%m-%d")
+            if dl > base_date: base_date = dl
+        if r['proxima_devolucao'] and r['proxima_devolucao'] > base_date: base_date = r['proxima_devolucao']
+            
+        est_date = base_date + timedelta(days=dias_frente)
+        r['data_estimada_str'] = est_date.strftime("%d/%m/%Y")
+
     cursor.close(); conn.close()
-    return resultados
+    return reservas
 
 @app.get("/notificacoes/{usuario_id}")
 def buscar_notificacoes(usuario_id: int):
@@ -569,7 +582,7 @@ def entrar_fila(reserva: NovaReserva):
         saldo = cursor.fetchone()['saldo']
         if saldo < preco: raise HTTPException(status_code=402, detail=f"Saldo insuficiente.")
         cursor.execute("UPDATE utilizadores SET saldo = saldo - %s WHERE id = %s", (preco, reserva.utilizador_id))
-        cursor.execute("INSERT INTO fila_espera (utilizador_id, jogo_id) VALUES (%s, %s) RETURNING id", (reserva.utilizador_id, reserva.jogo_id))
+        cursor.execute("INSERT INTO fila_espera (utilizador_id, jogo_id, dias_aluguel) VALUES (%s, %s, %s) RETURNING id", (reserva.utilizador_id, reserva.jogo_id, reserva.dias_aluguel))
         reserva_id = cursor.fetchone()['id']
         cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (reserva.utilizador_id, preco, f"Reserva na Fila ({reserva.dias_aluguel}d): {titulo}"))
         
@@ -790,17 +803,16 @@ def liberar_conta_manutencao(dados: ResetSenhaRequest, admin_data = Depends(veri
 
         # 🚀 LÓGICA DE SELEÇÃO BASEADA EM RANK
         cursor.execute("""
-            SELECT id, utilizador_id FROM fila_espera 
+            SELECT id, utilizador_id, dias_aluguel FROM fila_espera 
             WHERE jogo_id = %s AND status = 'AGUARDANDO' 
-            ORDER BY 
-              (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC, 
-              data_solicitacao ASC 
-            LIMIT 1
+            ORDER BY (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC, data_solicitacao ASC LIMIT 1
         """, (jogo_id,))
         proximo_da_fila = cursor.fetchone()
         
         if proximo_da_fila:
-            cursor.execute("INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + 7 * INTERVAL '1 day', 'ATIVA')", (proximo_da_fila['utilizador_id'], dados.conta_psn_id))
+            # 🚀 AGORA ELE RESPEITA SE O CLIENTE PAGOU POR 7 OU 14 DIAS
+            dias_comprados = proximo_da_fila.get('dias_aluguel', 7)
+            cursor.execute("INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA')", (proximo_da_fila['utilizador_id'], dados.conta_psn_id, dias_comprados))
             cursor.execute("UPDATE fila_espera SET status = 'CONCLUIDO' WHERE id = %s", (proximo_da_fila['id'],))
             cursor.execute("UPDATE contas_psn SET status = 'ALUGADA' WHERE id = %s", (dados.conta_psn_id,))
             mensagem = "Senha alterada! A conta foi entregue para o próximo da fila."
@@ -999,23 +1011,23 @@ def buscar_saldo_real(usuario_id: int):
 
 @app.on_event("startup")
 def iniciar_servicos():
-    # 🚀 CRIA A TABELA DE NOTIFICAÇÕES AUTOMATICAMENTE SE NÃO EXISTIR
     conn = get_db_connection()
     cursor = conn.cursor()
+    # Cria a tabela de Notificações
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS notificacoes (
-            id SERIAL PRIMARY KEY,
-            utilizador_id INT,
-            reserva_id INT,
-            jogo VARCHAR(255),
-            mensagem TEXT,
-            lida BOOLEAN DEFAULT FALSE,
-            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255),
+            mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # 🚀 ADICIONA A COLUNA DE DIAS (7 ou 14) NA FILA DE ESPERA SE NÃO EXISTIR
+    try:
+        cursor.execute("ALTER TABLE fila_espera ADD COLUMN dias_aluguel INT DEFAULT 7")
+    except Exception:
+        conn.rollback() # Ignora se a coluna já existir
+
     conn.commit()
-    cursor.close()
-    conn.close()
+    cursor.close(); conn.close()
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
