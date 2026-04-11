@@ -608,7 +608,8 @@ def cancelar_reserva(dados: CancelarReserva):
         res = cursor.fetchone()
         if not res: raise HTTPException(status_code=400, detail="Reserva não encontrada.")
 
-        cursor.execute("SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1", (dados.utilizador_id, f"Reserva na Fila%:{res['titulo']}%"))
+        # 🚀 CORRIGIDO: Busca flexível ignorando espaços exatos
+        cursor.execute("SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1", (dados.utilizador_id, f"Reserva na Fila%{res['titulo']}%"))
         trans = cursor.fetchone()
         reembolso = trans['valor'] if trans else 0.0
 
@@ -866,7 +867,6 @@ def admin_cancelar_reserva(reserva_id: int, admin_data = Depends(verificar_admin
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Busca a reserva e o título do jogo
         cursor.execute("""
             SELECT f.utilizador_id, f.jogo_id, j.titulo 
             FROM fila_espera f 
@@ -879,17 +879,15 @@ def admin_cancelar_reserva(reserva_id: int, admin_data = Depends(verificar_admin
         usr_id = res['utilizador_id']
         titulo = res['titulo']
 
-        # Acha o valor que o cliente pagou na reserva
-        cursor.execute("SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1", (usr_id, f"Reserva na Fila%:{titulo}%"))
+        # 🚀 CORRIGIDO: Busca flexível ignorando espaços exatos
+        cursor.execute("SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1", (usr_id, f"Reserva na Fila%{titulo}%"))
         trans = cursor.fetchone()
         reembolso = trans['valor'] if trans else 0.0
 
-        # Faz o estorno na carteira
         if reembolso > 0:
             cursor.execute("UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s", (reembolso, usr_id))
-            cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)", (usr_id, reembolso, f"💸 Estorno (Reserva Cancelada pelo Admin): {titulo}"))
+            cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)", (usr_id, reembolso, f"💸 Estorno (Admin): {titulo}"))
 
-        # Exclui a reserva
         cursor.execute("DELETE FROM fila_espera WHERE id = %s", (reserva_id,))
         
         conn.commit()
