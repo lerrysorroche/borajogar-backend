@@ -573,20 +573,21 @@ def entrar_fila(reserva: NovaReserva):
         reserva_id = cursor.fetchone()['id']
         cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (reserva.utilizador_id, preco, f"Reserva na Fila ({reserva.dias_aluguel}d): {titulo}"))
         
-        # 🚀 LÓGICA DO RANK 1 FURA-FILA E NOTIFICAÇÃO
+        # 🚀 NOVA LÓGICA DO RANK FURA-FILA MATEMÁTICO E NOTIFICAÇÃO
         cursor.execute("SELECT COUNT(*) as qtd FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA'", (reserva.utilizador_id,))
-        is_vip = cursor.fetchone()['qtd'] > 0
+        meus_alugueis_qtd = cursor.fetchone()['qtd']
         
-        if is_vip:
+        if meus_alugueis_qtd > 0:
+            # Seleciona todo mundo na fila que tem MENOS aluguéis que eu
             cursor.execute("""
                 SELECT f.id, f.utilizador_id
                 FROM fila_espera f 
                 WHERE f.jogo_id = %s AND f.status = 'AGUARDANDO' AND f.utilizador_id != %s
-                AND (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA') = 0
-            """, (reserva.jogo_id, reserva.utilizador_id))
+                AND (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA') < %s
+            """, (reserva.jogo_id, reserva.utilizador_id, meus_alugueis_qtd))
             bumped = cursor.fetchall()
             for b in bumped:
-                msg = f"Devido à prioridade de clientes Veteranos (Rank 1), a data prevista para a liberação do seu jogo {titulo} sofreu alterações."
+                msg = f"Devido à prioridade de clientes com Rank superior ao seu, a data prevista para a liberação do seu jogo {titulo} sofreu alterações."
                 cursor.execute("INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)", (b['utilizador_id'], b['id'], titulo, msg))
 
         conn.commit()
