@@ -844,6 +844,62 @@ def listar_todas_locacoes(admin_data = Depends(verificar_admin)):
     cursor.close(); conn.close()
     return resultados
 
+@app.get("/admin/reservas")
+def listar_todas_reservas(admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    query = """
+        SELECT f.id, u.nome AS cliente, j.titulo AS jogo, f.data_solicitacao, f.status, f.utilizador_id
+        FROM fila_espera f 
+        JOIN utilizadores u ON f.utilizador_id = u.id 
+        JOIN jogos j ON f.jogo_id = j.id 
+        WHERE f.status = 'AGUARDANDO'
+        ORDER BY f.data_solicitacao ASC;
+    """
+    cursor.execute(query)
+    resultados = cursor.fetchall()
+    cursor.close(); conn.close()
+    return resultados
+
+@app.post("/admin/reservas/{reserva_id}/cancelar")
+def admin_cancelar_reserva(reserva_id: int, admin_data = Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Busca a reserva e o título do jogo
+        cursor.execute("""
+            SELECT f.utilizador_id, f.jogo_id, j.titulo 
+            FROM fila_espera f 
+            JOIN jogos j ON f.jogo_id = j.id 
+            WHERE f.id = %s AND f.status = 'AGUARDANDO'
+        """, (reserva_id,))
+        res = cursor.fetchone()
+        if not res: raise HTTPException(status_code=400, detail="Reserva não encontrada ou já processada.")
+
+        usr_id = res['utilizador_id']
+        titulo = res['titulo']
+
+        # Acha o valor que o cliente pagou na reserva
+        cursor.execute("SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1", (usr_id, f"Reserva na Fila%:{titulo}%"))
+        trans = cursor.fetchone()
+        reembolso = trans['valor'] if trans else 0.0
+
+        # Faz o estorno na carteira
+        if reembolso > 0:
+            cursor.execute("UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s", (reembolso, usr_id))
+            cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)", (usr_id, reembolso, f"💸 Estorno (Reserva Cancelada pelo Admin): {titulo}"))
+
+        # Exclui a reserva
+        cursor.execute("DELETE FROM fila_espera WHERE id = %s", (reserva_id,))
+        
+        conn.commit()
+        return {"mensagem": f"Reserva de {titulo} cancelada e valor estornado ao cliente."}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close(); conn.close()
+
 @app.get("/usuarios")
 def listar_usuarios(admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
