@@ -74,7 +74,7 @@ class LoginRequest(BaseModel): email: str; senha: str
 class EsqueciSenhaRequest(BaseModel): email: str
 class MudarSenhaRequest(BaseModel): utilizador_id: int; senha_atual: str; nova_senha: str
 class NovaReserva(BaseModel): utilizador_id: int; jogo_id: int; dias_aluguel: int = 7
-class NovaRecarga(BaseModel): utilizador_id: int; valor: float; cupom: str = ""
+class NovaRecarga(BaseModel): utilizador_id: int; valor: float; cupom: str = ""; cpf: str
 class NovoCupom(BaseModel): codigo: str; tipo: str; valor: float
 class ResetSenhaRequest(BaseModel): conta_psn_id: int; nova_senha: str
 class AplicarMultaRequest(BaseModel): utilizador_id: int; valor: float = 50.0
@@ -421,10 +421,11 @@ def gerar_pix_asaas(recarga: NovaRecarga):
         cursor.execute("SELECT nome, email FROM utilizadores WHERE id = %s", (recarga.utilizador_id,))
         usr = cursor.fetchone()
 
+        # 🚀 AGORA USAMOS O CPF REAL DO CLIENTE PARA BLINDAR SUA CONTA ASAAS
         payload_cli = {
             "name": usr['nome'], 
             "email": usr['email'],
-            "cpfCnpj": "12345678909"
+            "cpfCnpj": recarga.cpf 
         }
         res_cli = requests.post(f"{ASAAS_URL}/customers", json=payload_cli, headers=HEADERS_ASAAS)
         if res_cli.status_code not in [200, 201]: 
