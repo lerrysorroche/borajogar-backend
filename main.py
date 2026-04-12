@@ -1029,27 +1029,32 @@ def buscar_saldo_real(usuario_id: int):
 
 @app.on_event("startup")
 def iniciar_servicos():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # 1. Cria a tabela de Notificações
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS notificacoes (
-            id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255),
-            mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit() # 🚀 SALVA A TABELA ANTES DE CONTINUAR!
-
-    # 2. Tenta adicionar a coluna de dias (Isolado em um Try/Catch)
+    # 🚀 TENTA CONECTAR NO BANCO, MAS SE DER ERRO DE REDE, NÃO DERRUBA O SERVIDOR
     try:
-        cursor.execute("ALTER TABLE fila_espera ADD COLUMN dias_aluguel INT DEFAULT 7")
-        conn.commit() # 🚀 SALVA SE DER CERTO
-    except Exception:
-        conn.rollback() # Ignora pacificamente se a coluna já existir
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. Cria a tabela de Notificações
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notificacoes (
+                id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255),
+                mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit() 
 
-    cursor.close(); conn.close()
+        # 2. Tenta adicionar a coluna de dias (Isolado em um Try/Catch)
+        try:
+            cursor.execute("ALTER TABLE fila_espera ADD COLUMN dias_aluguel INT DEFAULT 7")
+            conn.commit() 
+        except Exception:
+            conn.rollback() # Ignora pacificamente se a coluna já existir
 
+        cursor.close(); conn.close()
+    except Exception as e:
+        print(f"⚠️ AVISO DE STARTUP: Banco de dados ainda acordando. Detalhe: {e}")
+
+    # Inicia a checagem de devolução de 1 em 1 minuto
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
     scheduler.start()
