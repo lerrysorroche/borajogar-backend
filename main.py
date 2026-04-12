@@ -717,17 +717,49 @@ def realizar_locacao(locacao: NovaLocacao):
         cursor.close(); conn.close()
 
 @app.get("/admin/estatisticas")
-def buscar_estatisticas_admin(admin_data = Depends(verificar_admin)):
+def buscar_estatisticas_admin(periodo: str = "mes", admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT SUM(valor) as total FROM transacoes WHERE tipo = 'ENTRADA' AND descricao LIKE 'Recarga%'")
-    faturamento = cursor.fetchone()['total'] or 0.0
-    cursor.execute("SELECT COUNT(*) as total FROM utilizadores WHERE is_admin = false")
-    clientes = cursor.fetchone()['total'] or 0
-    cursor.execute("SELECT COUNT(*) as total FROM locacoes WHERE status = 'ATIVA'")
-    locacoes_ativas = cursor.fetchone()['total'] or 0
-    cursor.close(); conn.close()
-    return {"faturamento": float(faturamento), "total_clientes": clientes, "locacoes_ativas": locacoes_ativas}
+    
+    # Define a data de início baseada no filtro
+    hoje = datetime.now()
+    if periodo == "mes":
+        data_inicio = hoje.replace(day=1, hour=0, minute=0, second=0)
+    elif periodo == "30dias":
+        data_inicio = hoje - timedelta(days=30)
+    elif periodo == "ano":
+        data_inicio = hoje.replace(month=1, day=1, hour=0, minute=0, second=0)
+    else: # "tudo"
+        data_inicio = datetime(2000, 1, 1)
+
+    try:
+        # 1. Faturamento no período (Apenas recargas de clientes)
+        cursor.execute("""
+            SELECT SUM(valor) as total FROM transacoes 
+            WHERE tipo = 'ENTRADA' AND descricao LIKE 'Recarga%' 
+            AND data_transacao >= %s
+        """, (data_inicio,))
+        faturamento = cursor.fetchone()['total'] or 0.0
+
+        # 2. Novos Clientes no período
+        cursor.execute("SELECT COUNT(*) as total FROM utilizadores WHERE is_admin = false AND id IN (SELECT id FROM utilizadores WHERE id > 0)") # Simplificado, mas você pode adicionar data_criacao na tabela users se quiser precisão total de tempo
+        clientes = cursor.fetchone()['total'] or 0
+
+        # 3. Locações feitas no período (Movimentação)
+        cursor.execute("""
+            SELECT COUNT(*) as total FROM transacoes 
+            WHERE tipo = 'SAIDA' AND (descricao LIKE 'Aluguel%' OR descricao LIKE 'Reserva%')
+            AND data_transacao >= %s
+        """, (data_inicio,))
+        movimentacao = cursor.fetchone()['total'] or 0
+
+        return {
+            "faturamento": float(faturamento),
+            "total_clientes": clientes,
+            "movimentacao_periodo": movimentacao
+        }
+    finally:
+        cursor.close(); conn.close()
 
 @app.get("/admin/cupons")
 def listar_cupons(admin_data = Depends(verificar_admin)):
