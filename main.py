@@ -1014,20 +1014,23 @@ def buscar_saldo_real(usuario_id: int):
 def iniciar_servicos():
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Cria a tabela de Notificações
+    
+    # 1. Cria a tabela de Notificações
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS notificacoes (
             id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255),
             mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # 🚀 ADICIONA A COLUNA DE DIAS (7 ou 14) NA FILA DE ESPERA SE NÃO EXISTIR
+    conn.commit() # 🚀 SALVA A TABELA ANTES DE CONTINUAR!
+
+    # 2. Tenta adicionar a coluna de dias (Isolado em um Try/Catch)
     try:
         cursor.execute("ALTER TABLE fila_espera ADD COLUMN dias_aluguel INT DEFAULT 7")
+        conn.commit() # 🚀 SALVA SE DER CERTO
     except Exception:
-        conn.rollback() # Ignora se a coluna já existir
+        conn.rollback() # Ignora pacificamente se a coluna já existir
 
-    conn.commit()
     cursor.close(); conn.close()
 
     scheduler = BackgroundScheduler()
