@@ -604,34 +604,44 @@ def entrar_fila(reserva: NovaReserva):
         reserva_id = cursor.fetchone()['id']
         cursor.execute("INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)", (reserva.utilizador_id, preco, f"Reserva na Fila ({reserva.dias_aluguel}d): {titulo}"))
         
-        # 🚀 NOVA LÓGICA DO RANK FURA-FILA COM CÁLCULO DE DATAS
+        # 🚀 LÓGICA DO RANK FURA-FILA COM CÁLCULO DE DATAS CORRIGIDO
         cursor.execute("SELECT COUNT(*) as qtd FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA'", (reserva.utilizador_id,))
         meus_alugueis_qtd = cursor.fetchone()['qtd']
         
         if meus_alugueis_qtd > 0:
-            # Pega a data base do jogo
-            cursor.execute("SELECT MIN(l.data_fim) as prox FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = %s AND l.status = 'ATIVA'", (reserva.jogo_id,))
-            prox_dev = cursor.fetchone()['prox']
-            if not prox_dev: prox_dev = datetime.now()
+            # 1. Pega a Data Base Real (Hoje vs Lançamento vs Próxima Devolução)
+            cursor.execute("SELECT data_lancamento, (SELECT MIN(data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = %s AND l.status = 'ATIVA') as prox FROM jogos WHERE id = %s", (reserva.jogo_id, reserva.jogo_id))
+            jogo_meta = cursor.fetchone()
+            
+            base_date = datetime.now()
+            if jogo_meta['data_lancamento']:
+                dl = datetime.combine(jogo_meta['data_lancamento'], datetime.min.time())
+                if dl > base_date: base_date = dl
+            if jogo_meta['prox'] and jogo_meta['prox'] > base_date:
+                base_date = jogo_meta['prox']
 
+            # 2. Busca quem foi "empurrado"
             cursor.execute("""
                 SELECT f.id, f.utilizador_id,
-                (SELECT COUNT(*) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND f2.data_solicitacao < f.data_solicitacao) as posicao_antiga
+                (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND f2.data_solicitacao < f.data_solicitacao AND f2.id != %s) as dias_frente_antes
                 FROM fila_espera f 
                 WHERE f.jogo_id = %s AND f.status = 'AGUARDANDO' AND f.utilizador_id != %s
                 AND (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA') < %s
-            """, (reserva.jogo_id, reserva.utilizador_id, meus_alugueis_qtd))
+            """, (reserva_id, reserva.jogo_id, reserva.utilizador_id, meus_alugueis_qtd))
             bumped = cursor.fetchall()
             
             for b in bumped:
-                # Calcula a data antiga e a nova
-                data_antiga = prox_dev + timedelta(days=b['posicao_antiga'] * 7)
+                # 3. A mágica da matemática real:
+                # Data Antiga = Base + dias de quem já estava na frente
+                # Data Nova = Data Antiga + dias do VIP que furou a fila
+                dias_antes = b['dias_frente_antes']
+                data_antiga = base_date + timedelta(days=dias_antes)
                 data_nova = data_antiga + timedelta(days=reserva.dias_aluguel)
                 
                 str_antiga = data_antiga.strftime("%d/%m/%Y")
                 str_nova = data_nova.strftime("%d/%m/%Y")
                 
-                msg = f"Devido à prioridade de Rank, a previsão do seu jogo mudou de {str_antiga} para {str_nova} (+{reserva.dias_aluguel} dias)."
+                msg = f"Devido à prioridade de Rank, a previsão do seu jogo {titulo} mudou de {str_antiga} para {str_nova} (+{reserva.dias_aluguel} dias)."
                 cursor.execute("INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)", (b['utilizador_id'], b['id'], titulo, msg))
 
         conn.commit()
