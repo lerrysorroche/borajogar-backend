@@ -732,7 +732,7 @@ def buscar_estatisticas_admin(periodo: str = "mes", admin_data = Depends(verific
         data_inicio = datetime(2000, 1, 1)
 
     try:
-        # 🚀 O SEGREDO: Usar '%%' no LIKE para o Python não confundir com o '%s'
+        # 1. Faturamento respeita o filtro de tempo
         cursor.execute("""
             SELECT SUM(valor) as total FROM transacoes 
             WHERE tipo = 'ENTRADA' AND descricao LIKE 'Recarga%%' 
@@ -740,24 +740,22 @@ def buscar_estatisticas_admin(periodo: str = "mes", admin_data = Depends(verific
         """, (data_inicio,))
         faturamento = cursor.fetchone()['total'] or 0.0
 
+        # 2. Total de clientes
         cursor.execute("SELECT COUNT(*) as total FROM utilizadores WHERE is_admin = false")
         clientes = cursor.fetchone()['total'] or 0
 
-        cursor.execute("""
-            SELECT COUNT(*) as total FROM transacoes 
-            WHERE tipo = 'SAIDA' AND (descricao LIKE 'Aluguel%%' OR descricao LIKE 'Reserva%%')
-            AND data_transacao >= %s
-        """, (data_inicio,))
-        movimentacao = cursor.fetchone()['total'] or 0
+        # 3. 🚀 ROLLBACK: Locações ativas neste exato segundo (ignora data)
+        cursor.execute("SELECT COUNT(*) as total FROM locacoes WHERE status = 'ATIVA'")
+        locacoes_ativas = cursor.fetchone()['total'] or 0
 
         return {
             "faturamento": float(faturamento),
             "total_clientes": clientes,
-            "movimentacao_periodo": movimentacao
+            "locacoes_ativas": locacoes_ativas
         }
     except Exception as e:
         print(f"Erro nas Estatísticas: {e}")
-        return {"faturamento": 0.0, "total_clientes": 0, "movimentacao_periodo": 0}
+        return {"faturamento": 0.0, "total_clientes": 0, "locacoes_ativas": 0}
     finally:
         cursor.close(); conn.close()
 
