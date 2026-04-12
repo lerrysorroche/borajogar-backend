@@ -721,7 +721,6 @@ def buscar_estatisticas_admin(periodo: str = "mes", admin_data = Depends(verific
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    # Define a data de início baseada no filtro
     hoje = datetime.now()
     if periodo == "mes":
         data_inicio = hoje.replace(day=1, hour=0, minute=0, second=0)
@@ -733,22 +732,20 @@ def buscar_estatisticas_admin(periodo: str = "mes", admin_data = Depends(verific
         data_inicio = datetime(2000, 1, 1)
 
     try:
-        # 1. Faturamento no período (Apenas recargas de clientes)
+        # 🚀 O SEGREDO: Usar '%%' no LIKE para o Python não confundir com o '%s'
         cursor.execute("""
             SELECT SUM(valor) as total FROM transacoes 
-            WHERE tipo = 'ENTRADA' AND descricao LIKE 'Recarga%' 
+            WHERE tipo = 'ENTRADA' AND descricao LIKE 'Recarga%%' 
             AND data_transacao >= %s
         """, (data_inicio,))
         faturamento = cursor.fetchone()['total'] or 0.0
 
-        # 2. Novos Clientes no período
-        cursor.execute("SELECT COUNT(*) as total FROM utilizadores WHERE is_admin = false AND id IN (SELECT id FROM utilizadores WHERE id > 0)") # Simplificado, mas você pode adicionar data_criacao na tabela users se quiser precisão total de tempo
+        cursor.execute("SELECT COUNT(*) as total FROM utilizadores WHERE is_admin = false")
         clientes = cursor.fetchone()['total'] or 0
 
-        # 3. Locações feitas no período (Movimentação)
         cursor.execute("""
             SELECT COUNT(*) as total FROM transacoes 
-            WHERE tipo = 'SAIDA' AND (descricao LIKE 'Aluguel%' OR descricao LIKE 'Reserva%')
+            WHERE tipo = 'SAIDA' AND (descricao LIKE 'Aluguel%%' OR descricao LIKE 'Reserva%%')
             AND data_transacao >= %s
         """, (data_inicio,))
         movimentacao = cursor.fetchone()['total'] or 0
@@ -758,6 +755,9 @@ def buscar_estatisticas_admin(periodo: str = "mes", admin_data = Depends(verific
             "total_clientes": clientes,
             "movimentacao_periodo": movimentacao
         }
+    except Exception as e:
+        print(f"Erro nas Estatísticas: {e}")
+        return {"faturamento": 0.0, "total_clientes": 0, "movimentacao_periodo": 0}
     finally:
         cursor.close(); conn.close()
 
