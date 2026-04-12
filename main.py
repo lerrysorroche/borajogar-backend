@@ -213,16 +213,33 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data = Depends(verificar_admin)):
 def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
-            (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
-            (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
-            (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS fila_dias_espera,
-            (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
-            (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
-        FROM jogos j ORDER BY j.titulo ASC;"""
-    cursor.execute(query)
-    resultados = cursor.fetchall()
-    cursor.close(); conn.close()
+    try:
+        # 🚀 TENTA A CONSULTA NOVA (Com dias da fila e popularidade)
+        query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+                (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
+                (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
+                (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS fila_dias_espera,
+                (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
+                (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
+            FROM jogos j ORDER BY j.titulo ASC;"""
+        cursor.execute(query)
+        resultados = cursor.fetchall()
+    except Exception as e:
+        conn.rollback()
+        # 🛡️ PARAQUEDAS DE EMERGÊNCIA: Se a tabela não tiver a coluna nova, roda a consulta segura antiga!
+        print(f"Erro na query principal (rodando fallback): {e}")
+        query_segura = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+                (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
+                (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
+                0 AS fila_dias_espera,
+                (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
+                (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
+            FROM jogos j ORDER BY j.titulo ASC;"""
+        cursor.execute(query_segura)
+        resultados = cursor.fetchall()
+    finally:
+        cursor.close(); conn.close()
+    
     return resultados
 
 @app.get("/meus-alugueis/{usuario_id}")
