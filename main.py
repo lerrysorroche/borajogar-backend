@@ -892,8 +892,11 @@ def listar_todas_locacoes(admin_data = Depends(verificar_admin)):
 def listar_todas_reservas(admin_data = Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # 1. Puxa os dados básicos e a previsão mínima de devolução do jogo
     query = """
-        SELECT f.id, u.nome AS cliente, j.titulo AS jogo, f.data_solicitacao, f.status, f.utilizador_id
+        SELECT f.id, u.nome AS cliente, j.id AS jogo_id, j.titulo AS jogo, j.data_lancamento, f.data_solicitacao, f.status, f.utilizador_id, f.dias_aluguel,
+        (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA') AS proxima_devolucao
         FROM fila_espera f 
         JOIN utilizadores u ON f.utilizador_id = u.id 
         JOIN jogos j ON f.jogo_id = j.id 
@@ -901,9 +904,35 @@ def listar_todas_reservas(admin_data = Depends(verificar_admin)):
         ORDER BY f.data_solicitacao ASC;
     """
     cursor.execute(query)
-    resultados = cursor.fetchall()
+    reservas = cursor.fetchall()
+
+    # 2. Aplica a Matemática VIP de Fila para o Admin ver as datas exatas
+    for r in reservas:
+        cursor.execute("""
+            SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
+            WHERE jogo_id = %s AND status = 'AGUARDANDO' AND (
+                (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') > 
+                (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA')
+                OR ((SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') = 
+                 (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA') AND data_solicitacao < %s)
+            )
+        """, (r['jogo_id'], r['utilizador_id'], r['utilizador_id'], r['data_solicitacao']))
+        dias_frente = cursor.fetchone()['dias_frente']
+
+        base_date = datetime.now()
+        if r['data_lancamento']:
+            dl = datetime.strptime(str(r['data_lancamento']), "%Y-%m-%d")
+            if dl > base_date: base_date = dl
+        if r['proxima_devolucao'] and r['proxima_devolucao'] > base_date: base_date = r['proxima_devolucao']
+            
+        est_start_date = base_date + timedelta(days=dias_frente)
+        est_end_date = est_start_date + timedelta(days=r['dias_aluguel']) # Calcula o fim (Soma 7 ou 14)
+        
+        r['data_inicio'] = est_start_date.strftime("%d/%m/%Y")
+        r['data_fim'] = est_end_date.strftime("%d/%m/%Y")
+
     cursor.close(); conn.close()
-    return resultados
+    return reservas
 
 @app.post("/admin/reservas/{reserva_id}/cancelar")
 def admin_cancelar_reserva(reserva_id: int, admin_data = Depends(verificar_admin)):
