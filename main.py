@@ -447,7 +447,7 @@ def mudar_senha(req: MudarSenhaRequest):
 
 @app.post("/recarga/gerar-pix")
 def gerar_pix_asaas(recarga: NovaRecarga):
-    if recarga.valor < 15.0: raise HTTPException(status_code=400, detail="O valor mínimo de recarga é R$ 15,00.")
+    if recarga.valor < 30.0: raise HTTPException(status_code=400, detail="O valor mínimo de recarga é R$ 30,00.")
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
