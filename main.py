@@ -1085,6 +1085,73 @@ def verificar_alugueis_vencidos():
     finally:
         cursor.close(); conn.close()
 
+def processar_filas_automaticamente():
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # 1. Acha todos os jogos que têm alguém na fila E têm conta disponível no estoque
+        cursor.execute("""
+            SELECT DISTINCT f.jogo_id, j.titulo, j.data_lancamento
+            FROM fila_espera f
+            JOIN jogos j ON f.jogo_id = j.id
+            JOIN contas_psn c ON c.jogo_id = j.id
+            WHERE f.status = 'AGUARDANDO' AND c.status = 'DISPONIVEL'
+        """)
+        jogos_pendentes = cursor.fetchall()
+
+        hoje_str = datetime.now().strftime("%Y-%m-%d")
+
+        for jp in jogos_pendentes:
+            jogo_id = jp['jogo_id']
+            titulo = jp['titulo']
+            data_lanc_str = str(jp['data_lancamento']) if jp['data_lancamento'] else None
+
+            # 2. Trava de Segurança: Só libera se a data de lançamento já chegou (ou passou)
+            if data_lanc_str and data_lanc_str > hoje_str:
+                continue # Ainda está no futuro (Pré-venda), não faz nada.
+
+            # 3. Pega todas as contas disponíveis no cofre para este jogo
+            cursor.execute("SELECT id FROM contas_psn WHERE jogo_id = %s AND status = 'DISPONIVEL'", (jogo_id,))
+            contas_disponiveis = cursor.fetchall()
+
+            for conta in contas_disponiveis:
+                # 4. Pega o PRÓXIMO da fila (Respeitando exatamente a sua regra de Rank VIP)
+                cursor.execute("""
+                    SELECT id, utilizador_id, dias_aluguel FROM fila_espera 
+                    WHERE jogo_id = %s AND status = 'AGUARDANDO' 
+                    ORDER BY (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC, data_solicitacao ASC LIMIT 1
+                """, (jogo_id,))
+                proximo = cursor.fetchone()
+
+                if proximo:
+                    # 5. A mágica acontece: Transforma a Reserva em Locação Ativa silenciosamente
+                    cursor.execute("INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA')", (proximo['utilizador_id'], conta['id'], proximo['dias_aluguel']))
+                    cursor.execute("UPDATE fila_espera SET status = 'CONCLUIDO' WHERE id = %s", (proximo['id'],))
+                    cursor.execute("UPDATE contas_psn SET status = 'ALUGADA' WHERE id = %s", (conta['id'],))
+                    
+                    # 6. Manda a notificação de alegria pro cliente!
+                    msg = f"🎉 SEU ACESSO FOI LIBERADO! O jogo {titulo} acabou de lançar e a sua conta já está na aba 'Meus Acessos'. Bom jogo!"
+                    cursor.execute("INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)", (proximo['utilizador_id'], proximo['id'], titulo, msg))
+                    
+                    conn.commit()
+                else:
+                    break # Acabaram as pessoas na fila para este jogo, sobra a conta no estoque
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro no Processador de Fila Automático: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+# ====================================================================
+# ROTA DE EMERGÊNCIA (Para você rodar agora sem esperar 1 minuto)
+# ====================================================================
+@app.post("/admin/forcar-processamento-filas")
+def forcar_filas(admin_data = Depends(verificar_admin)):
+    processar_filas_automaticamente()
+    return {"mensagem": "O motor de filas rodou com sucesso! Verifique a aba de Locações Ativas."}
+
 @app.get("/usuarios/{usuario_id}/saldo")
 def buscar_saldo_real(usuario_id: int):
     conn = get_db_connection()
@@ -1123,7 +1190,8 @@ def iniciar_servicos():
     except Exception as e:
         print(f"⚠️ AVISO DE STARTUP: Banco de dados ainda acordando. Detalhe: {e}")
 
-    # Inicia a checagem de devolução de 1 em 1 minuto
+    # Inicia a checagem de devolução e processamento de filas de 1 em 1 minuto
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, 'interval', minutes=1)
+    scheduler.add_job(processar_filas_automaticamente, 'interval', minutes=1)
     scheduler.start()
