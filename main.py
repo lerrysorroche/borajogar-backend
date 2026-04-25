@@ -440,9 +440,19 @@ def listar_jogos():
 
             FROM jogos j 
             ORDER BY 
-                prioridade_vitrine ASC,          -- Separa nas 3 linhas
-                j.data_lancamento DESC NULLS LAST, -- Os mais novos primeiro (NULLS LAST joga jogos sem data pro limbo final)
-                popularidade DESC;               -- Desempata por popularidade
+                prioridade_vitrine ASC,          -- Separa a loja nas 3 linhas principais
+
+                -- 1️⃣ Regra da Pré-venda: O jogo que lança AMANHÃ vem antes do que lança MÊS QUE VEM
+                CASE WHEN j.data_lancamento > CURRENT_DATE THEN j.data_lancamento END ASC,
+
+                -- 2️⃣ Regra dos Lançamentos: O jogo que lançou HOJE vem antes do que lançou HÁ 5 MESES
+                CASE WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' AND j.data_lancamento <= CURRENT_DATE THEN j.data_lancamento END DESC,
+
+                -- 3️⃣ Regra do Catálogo: A POPULARIDADE (jogos mais alugados) domina a lista
+                CASE WHEN j.data_lancamento < CURRENT_DATE - INTERVAL '180 days' OR j.data_lancamento IS NULL THEN popularidade END DESC NULLS LAST,
+
+                -- ⚖️ Desempate Geral: Se dois jogos da linha 3 tiverem a mesma popularidade, o mais novo aparece antes
+                j.data_lancamento DESC NULLS LAST;
         """
         cursor.execute(query)
         resultados = cursor.fetchall()
@@ -458,7 +468,20 @@ def listar_jogos():
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
             FROM jogos j 
-            ORDER BY j.titulo ASC;
+            ORDER BY 
+                prioridade_vitrine ASC,          -- Separa a loja nas 3 linhas principais
+
+                -- 1️⃣ Regra da Pré-venda: O jogo que lança AMANHÃ vem antes do que lança MÊS QUE VEM
+                CASE WHEN j.data_lancamento > CURRENT_DATE THEN j.data_lancamento END ASC,
+
+                -- 2️⃣ Regra dos Lançamentos: O jogo que lançou HOJE vem antes do que lançou HÁ 5 MESES
+                CASE WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' AND j.data_lancamento <= CURRENT_DATE THEN j.data_lancamento END DESC,
+
+                -- 3️⃣ Regra do Catálogo: A POPULARIDADE (jogos mais alugados) domina a lista
+                CASE WHEN j.data_lancamento < CURRENT_DATE - INTERVAL '180 days' OR j.data_lancamento IS NULL THEN popularidade END DESC NULLS LAST,
+
+                -- ⚖️ Desempate Geral: Se dois jogos da linha 3 tiverem a mesma popularidade, o mais novo aparece antes
+                j.data_lancamento DESC NULLS LAST;
         """
         cursor.execute(query_segura)
         resultados = cursor.fetchall()
