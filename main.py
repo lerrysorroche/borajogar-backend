@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -54,11 +55,14 @@ def criar_token_acesso(dados: dict):
     return jwt.encode(dados_para_codificar, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def verificar_admin(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Crachá digital não enviado.")
+security = HTTPBearer()
+
+
+def verificar_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = (
+        credentials.credentials
+    )  # O FastAPI já arranca a palavra "Bearer " para você!
     try:
-        token = authorization.replace("Bearer ", "")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         if not payload.get("is_admin"):
             raise HTTPException(status_code=403, detail="Acesso Negado.")
