@@ -30,8 +30,11 @@ ALGORITHM = "HS256"
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ==============================================================================
-# INTEGRAÇÃO ASAAS (PRODUÇÃO - DINHEIRO REAL)
+# INTEGRAÇÕES (Asaas e RAWG)
 # ==============================================================================
+RAWG_API_KEY = os.getenv(
+    "RAWG_API_KEY"
+)  # Lembre-se de colocar isso no painel do Render depois!
 ASAAS_API_KEY = os.getenv("ASAAS_API_KEY")
 ASAAS_URL = "https://api.asaas.com/v3"
 HEADERS_ASAAS = {"access_token": ASAAS_API_KEY, "Content-Type": "application/json"}
@@ -418,27 +421,44 @@ def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # 🚀 TENTA A CONSULTA NOVA (Com dias da fila e popularidade)
-        query = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+        # 🚀 CONSULTA INTELIGENTE (As 3 Linhas da Vitrine)
+        query = """
+            SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
                 (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS fila_dias_espera,
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
-                (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
-            FROM jogos j ORDER BY j.titulo ASC;"""
+                (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
+                
+                -- A MAGIA ACONTECE AQUI:
+                CASE 
+                    WHEN j.data_lancamento > CURRENT_DATE THEN 1 -- Linha 1: Pré-Venda
+                    WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' THEN 2 -- Linha 2: Lançamentos Recentes (6 meses)
+                    ELSE 3 -- Linha 3: Catálogo normal
+                END as prioridade_vitrine
+
+            FROM jogos j 
+            ORDER BY 
+                prioridade_vitrine ASC,          -- Separa nas 3 linhas
+                j.data_lancamento DESC NULLS LAST, -- Os mais novos primeiro (NULLS LAST joga jogos sem data pro limbo final)
+                popularidade DESC;               -- Desempata por popularidade
+        """
         cursor.execute(query)
         resultados = cursor.fetchall()
     except Exception as e:
         conn.rollback()
-        # 🛡️ PARAQUEDAS DE EMERGÊNCIA: Se a tabela não tiver a coluna nova, roda a consulta segura antiga!
+        # 🛡️ PARAQUEDAS DE EMERGÊNCIA
         print(f"Erro na query principal (rodando fallback): {e}")
-        query_segura = """SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+        query_segura = """
+            SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
                 0 AS fila_dias_espera,
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
-            FROM jogos j ORDER BY j.titulo ASC;"""
+            FROM jogos j 
+            ORDER BY j.titulo ASC;
+        """
         cursor.execute(query_segura)
         resultados = cursor.fetchall()
     finally:
@@ -1519,6 +1539,52 @@ def liberar_conta_manutencao(
             conn.commit()
 
         return {"mensagem": mensagem}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.post("/admin/limpar-datas-catalogo")
+def sincronizar_datas_vazias(admin_data=Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    if not RAWG_API_KEY:
+        raise HTTPException(
+            status_code=500, detail="Chave RAWG_API_KEY não configurada."
+        )
+
+    try:
+        # Busca apenas os jogos que estão com a data vazia
+        cursor.execute("SELECT id, titulo FROM jogos WHERE data_lancamento IS NULL")
+        jogos_sem_data = cursor.fetchall()
+
+        jogos_atualizados = 0
+
+        for jogo in jogos_sem_data:
+            url = f"https://api.rawg.io/api/games?search={jogo['titulo']}&key={RAWG_API_KEY}&page_size=1"
+            res = requests.get(url)
+
+            if res.status_code == 200:
+                dados = res.json()
+                if dados.get("results") and len(dados["results"]) > 0:
+                    data_rawg = dados["results"][0].get("released")
+
+                    if data_rawg:
+                        cursor.execute(
+                            "UPDATE jogos SET data_lancamento = %s WHERE id = %s",
+                            (data_rawg, jogo["id"]),
+                        )
+                        jogos_atualizados += 1
+
+        conn.commit()
+        return {
+            "mensagem": f"Faxina concluída! {jogos_atualizados} jogos foram atualizados com a data oficial do RAWG."
+        }
+
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))
