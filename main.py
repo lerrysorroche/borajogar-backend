@@ -422,44 +422,48 @@ def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # 🚀 CONSULTA INTELIGENTE (As 3 Linhas da Vitrine)
+        # 🚀 CONSULTA INTELIGENTE FINAL
+        # Resolve o erro 500 repetindo a subquery de contagem no ORDER BY
         query = """
             SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
                 (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS fila_dias_espera,
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
+                
+                -- Contagem para o Frontend exibir:
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
                 
-                -- A MAGIA ACONTECE AQUI:
                 CASE 
-                    WHEN j.data_lancamento > CURRENT_DATE THEN 1 -- Linha 1: Pré-Venda
-                    WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' THEN 2 -- Linha 2: Lançamentos Recentes (6 meses)
-                    ELSE 3 -- Linha 3: Catálogo normal
+                    WHEN j.data_lancamento > CURRENT_DATE THEN 1 
+                    WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' THEN 2 
+                    ELSE 3 
                 END as prioridade_vitrine
 
             FROM jogos j 
             ORDER BY 
-                prioridade_vitrine ASC,          -- Separa a loja nas 3 linhas principais
+                prioridade_vitrine ASC,
 
-                -- 1️⃣ Regra da Pré-venda: O jogo que lança AMANHÃ vem antes do que lança MÊS QUE VEM
+                -- 1️⃣ Linha 1: Jogo que lança mais cedo vem primeiro
                 CASE WHEN j.data_lancamento > CURRENT_DATE THEN j.data_lancamento END ASC,
 
-                -- 2️⃣ Regra dos Lançamentos: O jogo que lançou HOJE vem antes do que lançou HÁ 5 MESES
+                -- 2️⃣ Linha 2: Jogo que lançou mais recentemente vem primeiro
                 CASE WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' AND j.data_lancamento <= CURRENT_DATE THEN j.data_lancamento END DESC,
 
-                -- 3️⃣ Regra do Catálogo: A POPULARIDADE (jogos mais alugados) domina a lista
-                CASE WHEN j.data_lancamento < CURRENT_DATE - INTERVAL '180 days' OR j.data_lancamento IS NULL THEN popularidade END DESC NULLS LAST,
+                -- 3️⃣ Linha 3 (Catálogo): POPULARIDADE REAL (O Red Dead vai subir aqui!)
+                CASE WHEN j.data_lancamento < CURRENT_DATE - INTERVAL '180 days' OR j.data_lancamento IS NULL 
+                     THEN (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) 
+                END DESC NULLS LAST,
 
-                -- ⚖️ Desempate Geral: Se dois jogos da linha 3 tiverem a mesma popularidade, o mais novo aparece antes
+                -- ⚖️ Desempate: Mais novos primeiro
                 j.data_lancamento DESC NULLS LAST;
         """
         cursor.execute(query)
         resultados = cursor.fetchall()
     except Exception as e:
         conn.rollback()
-        # 🛡️ PARAQUEDAS DE EMERGÊNCIA
         print(f"Erro na query principal (rodando fallback): {e}")
+        # 🛡️ Fallback infalível: Ordena por ID decrescente se tudo falhar
         query_segura = """
             SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
@@ -468,20 +472,7 @@ def listar_jogos():
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
             FROM jogos j 
-            ORDER BY 
-                prioridade_vitrine ASC,          -- Separa a loja nas 3 linhas principais
-
-                -- 1️⃣ Regra da Pré-venda: O jogo que lança AMANHÃ vem antes do que lança MÊS QUE VEM
-                CASE WHEN j.data_lancamento > CURRENT_DATE THEN j.data_lancamento END ASC,
-
-                -- 2️⃣ Regra dos Lançamentos: O jogo que lançou HOJE vem antes do que lançou HÁ 5 MESES
-                CASE WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' AND j.data_lancamento <= CURRENT_DATE THEN j.data_lancamento END DESC,
-
-                -- 3️⃣ Regra do Catálogo: A POPULARIDADE (jogos mais alugados) domina a lista
-                CASE WHEN j.data_lancamento < CURRENT_DATE - INTERVAL '180 days' OR j.data_lancamento IS NULL THEN popularidade END DESC NULLS LAST,
-
-                -- ⚖️ Desempate Geral: Se dois jogos da linha 3 tiverem a mesma popularidade, o mais novo aparece antes
-                j.data_lancamento DESC NULLS LAST;
+            ORDER BY j.id DESC;
         """
         cursor.execute(query_segura)
         resultados = cursor.fetchall()
