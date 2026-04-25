@@ -31,11 +31,8 @@ ALGORITHM = "HS256"
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ==============================================================================
-# INTEGRAÇÕES (Asaas e RAWG)
+# INTEGRAÇÕES (Asaas)
 # ==============================================================================
-RAWG_API_KEY = os.getenv(
-    "RAWG_API_KEY"
-)  # Lembre-se de colocar isso no painel do Render depois!
 ASAAS_API_KEY = os.getenv("ASAAS_API_KEY")
 ASAAS_URL = "https://api.asaas.com/v3"
 HEADERS_ASAAS = {"access_token": ASAAS_API_KEY, "Content-Type": "application/json"}
@@ -1543,52 +1540,6 @@ def liberar_conta_manutencao(
             conn.commit()
 
         return {"mensagem": mensagem}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-
-@app.post("/admin/limpar-datas-catalogo")
-def sincronizar_datas_vazias(admin_data=Depends(verificar_admin)):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-    if not RAWG_API_KEY:
-        raise HTTPException(
-            status_code=500, detail="Chave RAWG_API_KEY não configurada."
-        )
-
-    try:
-        # Busca apenas os jogos que estão com a data vazia
-        cursor.execute("SELECT id, titulo FROM jogos WHERE data_lancamento IS NULL")
-        jogos_sem_data = cursor.fetchall()
-
-        jogos_atualizados = 0
-
-        for jogo in jogos_sem_data:
-            url = f"https://api.rawg.io/api/games?search={jogo['titulo']}&key={RAWG_API_KEY}&page_size=1"
-            res = requests.get(url)
-
-            if res.status_code == 200:
-                dados = res.json()
-                if dados.get("results") and len(dados["results"]) > 0:
-                    data_rawg = dados["results"][0].get("released")
-
-                    if data_rawg:
-                        cursor.execute(
-                            "UPDATE jogos SET data_lancamento = %s WHERE id = %s",
-                            (data_rawg, jogo["id"]),
-                        )
-                        jogos_atualizados += 1
-
-        conn.commit()
-        return {
-            "mensagem": f"Faxina concluída! {jogos_atualizados} jogos foram atualizados com a data oficial do RAWG."
-        }
-
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))
