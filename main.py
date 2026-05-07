@@ -523,7 +523,7 @@ def gerar_checkout_stripe(recarga: NovaRecarga):
 
 @app.post("/recarga/pix")
 def gerar_pix_efi(recarga: NovaRecarga):
-    """Gera QR Code Pix Direto via Efi"""
+    """Gera QR Code Pix Direto via Efi com Raio-X de Erros"""
     if recarga.valor < 30.0:
         raise HTTPException(
             status_code=400, detail="O valor mínimo de recarga é R$ 30,00."
@@ -536,6 +536,7 @@ def gerar_pix_efi(recarga: NovaRecarga):
         valor_bonus_cupom = 0.0
         cupom_nome = recarga.cupom.upper() if recarga.cupom else ""
 
+        # Lógica do cupom (mantida igual)
         if recarga.cupom:
             cursor.execute(
                 "SELECT id, tipo, valor FROM cupons WHERE codigo = %s AND ativo = TRUE",
@@ -561,6 +562,13 @@ def gerar_pix_efi(recarga: NovaRecarga):
             elif cupom["tipo"] == "PORCENTAGEM":
                 valor_bonus_cupom = recarga.valor * (cupom["valor"] / 100.0)
 
+        # VALIDAÇÃO DE SEGURANÇA 1: Chave Pix configurada?
+        if not EFI_CHAVE_PIX:
+            raise HTTPException(
+                status_code=400,
+                detail="ERRO INTERNO: A variável EFI_CHAVE_PIX não foi definida no Render.",
+            )
+
         # Inicia EFÍ e gera cobrança
         efi = EfiPay(credentials_efi)
         txid = "".join(random.choices(string.ascii_letters + string.digits, k=30))
@@ -572,11 +580,38 @@ def gerar_pix_efi(recarga: NovaRecarga):
             "infoAdicionais": [{"nome": "Serviço", "valor": "Recarga Bora Jogar"}],
         }
 
-        resposta_cob = efi.pix_create_charge(params={"txid": txid}, body=body)
-        loc_id = resposta_cob.get("loc", {}).get("id")
+        # VALIDAÇÃO DE SEGURANÇA 2: A Efí aceitou a cobrança?
+        try:
+            resposta_cob = efi.pix_create_charge(params={"txid": txid}, body=body)
+        except Exception as err:
+            raise HTTPException(
+                status_code=400, detail=f"A Efí recusou a criação do Pix: {str(err)}"
+            )
 
-        # Gera QRCode
-        resposta_qr = efi.pix_generate_qrcode(params={"id": loc_id})
+        loc_id = resposta_cob.get("loc", {}).get("id")
+        if not loc_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A Efí não gerou a ID de localização. Resposta da Efí: {resposta_cob}",
+            )
+
+        # VALIDAÇÃO DE SEGURANÇA 3: A Efí gerou a imagem?
+        try:
+            resposta_qr = efi.pix_generate_qrcode(params={"id": loc_id})
+        except Exception as err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A Efí recusou gerar a imagem do QRCode: {str(err)}",
+            )
+
+        qr_code_img = resposta_qr.get("imagemQrcode")
+        copia_cola = resposta_qr.get("qrcode")
+
+        if not qr_code_img or not copia_cola:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A Efí retornou dados vazios. Resposta da Efí: {resposta_qr}",
+            )
 
         cursor.execute(
             "INSERT INTO pedidos_pix (id, utilizador_id, valor_pago, valor_bonus, cupom, status) VALUES (%s, %s, %s, %s, %s, 'PENDENTE')",
@@ -584,11 +619,7 @@ def gerar_pix_efi(recarga: NovaRecarga):
         )
         conn.commit()
 
-        return {
-            "payment_id": txid,
-            "copia_cola": resposta_qr.get("qrcode"),
-            "qr_code": resposta_qr.get("imagemQrcode"),
-        }
+        return {"payment_id": txid, "copia_cola": copia_cola, "qr_code": qr_code_img}
 
     except Exception as e:
         conn.rollback()
