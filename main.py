@@ -632,19 +632,46 @@ def gerar_pix_efi(recarga: NovaRecarga):
 
 
 @app.get("/recarga/status/{payment_id}")
-def checar_status_pagamento_bd(payment_id: str):
-    """Frontend consulta aqui para saber se a tela deve dar o confete de sucesso"""
+def checar_status_pagamento_inteligente(payment_id: str):
+    """Consulta o banco e, se necessário, consulta a Efí diretamente (Fallback)"""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cursor.execute("SELECT status FROM pedidos_pix WHERE id = %s", (payment_id,))
+        # 1. Primeiro olha no nosso banco de dados
+        cursor.execute(
+            "SELECT status, utilizador_id, valor_pago, valor_bonus, cupom FROM pedidos_pix WHERE id = %s",
+            (payment_id,),
+        )
         pedido = cursor.fetchone()
 
-        if pedido and pedido["status"] == "CONCLUIDO":
+        if not pedido:
+            return {"status": "NAO_ENCONTRADO"}
+
+        if pedido["status"] == "CONCLUIDO":
             return {"status": "PAGO"}
+
+        # 2. 🚀 FALLBACK: Se no banco está PENDENTE, vamos perguntar na Efí (Modo Ativo)
+        # Isso salva o sistema se o Webhook falhar!
+        efi = EfiPay(credentials_efi)
+        try:
+            # Consulta a cobrança pelo txid (que é o nosso payment_id)
+            detalhes = efi.pix_detail_charge(params={"txid": payment_id})
+            status_efi = detalhes.get("status")
+
+            if status_efi == "CONCLUIDA":
+                # O cliente pagou, mas o webhook não avisou! Vamos processar agora.
+                processar_sucesso_pagamento(
+                    payment_id=payment_id,
+                    user_id=pedido["utilizador_id"],
+                    valor_pago=pedido["valor_pago"],
+                    valor_bonus=pedido["valor_bonus"],
+                    cupom_nome=pedido["cupom"],
+                )
+                return {"status": "PAGO"}
+        except Exception as e:
+            print(f"Erro ao consultar fallback na Efí: {e}")
+
         return {"status": "PENDENTE"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close()
         conn.close()
