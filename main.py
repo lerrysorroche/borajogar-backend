@@ -15,7 +15,9 @@ import string
 import requests
 import urllib.request
 import json
-import stripe  # NOVA INTEGRAÇÃO
+import stripe
+import base64
+from efipay import EfiPay
 
 app = FastAPI(title="API Locadora PS5")
 
@@ -32,15 +34,35 @@ ALGORITHM = "HS256"
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ==============================================================================
-# INTEGRAÇÕES (Stripe)
+# INTEGRAÇÕES (Stripe & Efí)
 # ==============================================================================
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
 # URL para onde a Stripe envia o cliente após o pagamento no checkout deles
 URL_SUCESSO_FRONTEND = os.getenv("FRONTEND_URL", "http://localhost:3000") + "/sucesso"
 URL_CANCELAMENTO_FRONTEND = (
     os.getenv("FRONTEND_URL", "http://localhost:3000") + "/carteira"
 )
+
+# Configurações Efí (Gerencianet)
+EFI_CLIENT_ID = os.getenv("EFI_CLIENT_ID")
+EFI_CLIENT_SECRET = os.getenv("EFI_CLIENT_SECRET")
+EFI_CHAVE_PIX = os.getenv("EFI_CHAVE_PIX")  # Chave Pix cadastrada na Efi
+EFI_CERT_PATH = "certificado_efi.pem"
+
+# TRUQUE PARA O RENDER: Recria o arquivo do certificado a partir da variável de ambiente
+cert_base64 = os.getenv("EFI_CERT_BASE64")
+if cert_base64:
+    with open(EFI_CERT_PATH, "wb") as f:
+        f.write(base64.b64decode(cert_base64))
+
+credentials_efi = {
+    "client_id": EFI_CLIENT_ID,
+    "client_secret": EFI_CLIENT_SECRET,
+    "sandbox": False,
+    "certificate": EFI_CERT_PATH,
+}
 
 
 def gerar_hash_senha(senha):
@@ -227,43 +249,14 @@ class CancelarReserva(BaseModel):
 
 
 # ==============================================================================
-# WEBHOOK STRIPE (Processamento Automático e Seguro de Pagamentos)
+# MOTOR DE PAGAMENTOS E WEBHOOKS (Stripe & Efí)
 # ==============================================================================
-@app.post("/api/webhooks/stripe")
-async def stripe_webhook(request: Request):
-    # A Stripe exige o corpo "cru" da requisição para verificar a assinatura
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError as e:
-        print("⚠️ Payload inválido!")
-        raise HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.error.SignatureVerificationError as e:
-        print("⚠️ Assinatura Stripe inválida! Tentativa de fraude bloqueada.")
-        raise HTTPException(status_code=400, detail="Invalid signature")
-
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-
-        # Só processa se o pagamento foi concluído de fato (evita boletos/pix pendentes)
-        if session.payment_status == "paid":
-            processar_sucesso_pagamento(session)
-
-    elif event["type"] == "checkout.session.async_payment_succeeded":
-        # Caso o Pix demore um pouco e seja aprovado assincronamente
-        session = event["data"]["object"]
-        processar_sucesso_pagamento(session)
-
-    return {"status": "success"}
 
 
-def processar_sucesso_pagamento(session):
-    payment_id = session.id
-
+def processar_sucesso_pagamento(
+    payment_id, user_id, valor_pago, valor_bonus, cupom_nome
+):
+    """Motor universal de baixa de pagamentos (Serve para Cartão e Pix)"""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -272,11 +265,6 @@ def processar_sucesso_pagamento(session):
         pedido = cursor.fetchone()
 
         if pedido and pedido["status"] == "PENDENTE":
-            user_id = int(session.metadata.get("utilizador_id"))
-            valor_pago = float(session.metadata.get("valor_pago"))
-            valor_bonus = float(session.metadata.get("valor_bonus"))
-            cupom_nome = session.metadata.get("cupom")
-
             # Verifica se é a primeira recarga para dar bônus de indicação
             cursor.execute(
                 "SELECT COUNT(*) as qtd FROM transacoes WHERE utilizador_id = %s AND descricao LIKE 'Recarga%%'",
@@ -295,7 +283,7 @@ def processar_sucesso_pagamento(session):
 
             # Registra transação principal
             cursor.execute(
-                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, 'Recarga via Stripe (Pix/Cartão)')",
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, 'Recarga de Carteira (Cartão/Pix)')",
                 (user_id, valor_pago),
             )
 
@@ -336,7 +324,7 @@ def processar_sucesso_pagamento(session):
                 (payment_id,),
             )
             conn.commit()
-            print(f"💰 Pagamento processado com sucesso! Sessão: {payment_id}")
+            print(f"💰 Pagamento processado com sucesso! Pedido ID: {payment_id}")
 
     except Exception as e:
         conn.rollback()
@@ -346,8 +334,293 @@ def processar_sucesso_pagamento(session):
         conn.close()
 
 
+@app.post("/api/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    """Webhook para pagamentos no Cartão de Crédito"""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] in [
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+    ]:
+        session = event["data"]["object"]
+        if session.payment_status == "paid":
+            processar_sucesso_pagamento(
+                payment_id=session.id,
+                user_id=int(session.metadata.get("utilizador_id")),
+                valor_pago=float(session.metadata.get("valor_pago")),
+                valor_bonus=float(session.metadata.get("valor_bonus")),
+                cupom_nome=session.metadata.get("cupom"),
+            )
+    return {"status": "success"}
+
+
+@app.post("/api/webhooks/efi")
+async def efi_webhook(request: Request):
+    """Webhook para confirmação automática de pagamentos Pix via Efí"""
+    try:
+        request_data = await request.json()
+        pagamentos = request_data.get("pix", [])
+
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        for pag in pagamentos:
+            txid = pag.get("txid")
+
+            # Puxamos os metadados salvos no ato da criação do QR Code
+            cursor.execute(
+                "SELECT utilizador_id, valor_pago, valor_bonus, cupom FROM pedidos_pix WHERE id = %s AND status = 'PENDENTE'",
+                (txid,),
+            )
+            pedido = cursor.fetchone()
+
+            if pedido:
+                # O banco injeta direto no motor universal
+                processar_sucesso_pagamento(
+                    payment_id=txid,
+                    user_id=pedido["utilizador_id"],
+                    valor_pago=pedido["valor_pago"],
+                    valor_bonus=pedido["valor_bonus"],
+                    cupom_nome=pedido["cupom"],
+                )
+
+        cursor.close()
+        conn.close()
+        return {"status": "200 OK"}
+    except Exception as e:
+        print(f"Erro no Webhook Efí: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno")
+
+
+@app.get("/admin/registrar-webhook-efi")
+def registrar_webhook(admin_data=Depends(verificar_admin)):
+    """Rota administrativa para atrelar o servidor à Efí uma única vez"""
+    efi = EfiPay(credentials_efi)
+
+    # Monta a URL baseado no servidor atual
+    backend_url = os.getenv("BACKEND_URL", "https://api-bora-jogar.onrender.com")
+    webhook_url = f"{backend_url}/api/webhooks/efi"
+
+    body = {"webhookUrl": webhook_url}
+    try:
+        resposta = efi.pix_config_webhook(params={"chave": EFI_CHAVE_PIX}, body=body)
+        return resposta
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ==============================================================================
-# ROTAS DA API
+# CHECKOUTS E GERAÇÃO DE PAGAMENTOS
+# ==============================================================================
+
+
+@app.post("/recarga/cartao")
+def gerar_checkout_stripe(recarga: NovaRecarga):
+    """Gera Link Seguro de Pagamento na Stripe focado apenas em Cartão"""
+    if recarga.valor < 30.0:
+        raise HTTPException(
+            status_code=400, detail="O valor mínimo de recarga é R$ 30,00."
+        )
+
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        valor_bonus_cupom = 0.0
+        cupom_nome = recarga.cupom.upper() if recarga.cupom else ""
+
+        if recarga.cupom:
+            cursor.execute(
+                "SELECT id, tipo, valor FROM cupons WHERE codigo = %s AND ativo = TRUE",
+                (cupom_nome,),
+            )
+            cupom = cursor.fetchone()
+            if not cupom:
+                raise HTTPException(
+                    status_code=404, detail="Cupom inválido ou expirado."
+                )
+
+            cursor.execute(
+                "SELECT id FROM cupons_usados WHERE utilizador_id = %s AND cupom_id = %s",
+                (recarga.utilizador_id, cupom["id"]),
+            )
+            if cursor.fetchone():
+                raise HTTPException(
+                    status_code=400, detail="Você já utilizou este cupom promocional."
+                )
+
+            if cupom["tipo"] == "FIXO":
+                valor_bonus_cupom = cupom["valor"]
+            elif cupom["tipo"] == "PORCENTAGEM":
+                valor_bonus_cupom = recarga.valor * (cupom["valor"] / 100.0)
+
+        cursor.execute(
+            "SELECT email FROM utilizadores WHERE id = %s", (recarga.utilizador_id,)
+        )
+        usr = cursor.fetchone()
+
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],  # Exclusivo Cartão
+            customer_email=usr["email"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "brl",
+                        "product_data": {
+                            "name": "Recarga de Carteira - BORA JOGAR",
+                            "description": "Adição de fundos para locação de jogos PS5",
+                        },
+                        "unit_amount": int(recarga.valor * 100),
+                    },
+                    "quantity": 1,
+                }
+            ],
+            mode="payment",
+            success_url=URL_SUCESSO_FRONTEND,
+            cancel_url=URL_CANCELAMENTO_FRONTEND,
+            metadata={
+                "utilizador_id": str(recarga.utilizador_id),
+                "valor_pago": str(recarga.valor),
+                "valor_bonus": str(valor_bonus_cupom),
+                "cupom": cupom_nome,
+            },
+        )
+
+        cursor.execute(
+            "INSERT INTO pedidos_pix (id, utilizador_id, valor_pago, valor_bonus, cupom, status) VALUES (%s, %s, %s, %s, %s, 'PENDENTE')",
+            (
+                session.id,
+                recarga.utilizador_id,
+                recarga.valor,
+                valor_bonus_cupom,
+                cupom_nome,
+            ),
+        )
+        conn.commit()
+
+        return {"checkout_url": session.url, "payment_id": session.id}
+
+    except Exception as e:
+        conn.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.post("/recarga/pix")
+def gerar_pix_efi(recarga: NovaRecarga):
+    """Gera QR Code Pix Direto via Efi"""
+    if recarga.valor < 30.0:
+        raise HTTPException(
+            status_code=400, detail="O valor mínimo de recarga é R$ 30,00."
+        )
+
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        valor_bonus_cupom = 0.0
+        cupom_nome = recarga.cupom.upper() if recarga.cupom else ""
+
+        if recarga.cupom:
+            cursor.execute(
+                "SELECT id, tipo, valor FROM cupons WHERE codigo = %s AND ativo = TRUE",
+                (cupom_nome,),
+            )
+            cupom = cursor.fetchone()
+            if not cupom:
+                raise HTTPException(
+                    status_code=404, detail="Cupom inválido ou expirado."
+                )
+
+            cursor.execute(
+                "SELECT id FROM cupons_usados WHERE utilizador_id = %s AND cupom_id = %s",
+                (recarga.utilizador_id, cupom["id"]),
+            )
+            if cursor.fetchone():
+                raise HTTPException(
+                    status_code=400, detail="Você já utilizou este cupom promocional."
+                )
+
+            if cupom["tipo"] == "FIXO":
+                valor_bonus_cupom = cupom["valor"]
+            elif cupom["tipo"] == "PORCENTAGEM":
+                valor_bonus_cupom = recarga.valor * (cupom["valor"] / 100.0)
+
+        # Inicia EFÍ e gera cobrança
+        efi = EfiPay(credentials_efi)
+        txid = "".join(random.choices(string.ascii_letters + string.digits, k=30))
+
+        body = {
+            "calendario": {"expiracao": 3600},
+            "valor": {"original": f"{recarga.valor:.2f}"},
+            "chave": EFI_CHAVE_PIX,
+            "infoAdicionais": [{"nome": "Serviço", "valor": "Recarga Bora Jogar"}],
+        }
+
+        resposta_cob = efi.pix_create_charge(params={"txid": txid}, body=body)
+        loc_id = resposta_cob.get("loc", {}).get("id")
+
+        # Gera QRCode
+        resposta_qr = efi.pix_generate_qrcode(params={"id": loc_id})
+
+        cursor.execute(
+            "INSERT INTO pedidos_pix (id, utilizador_id, valor_pago, valor_bonus, cupom, status) VALUES (%s, %s, %s, %s, %s, 'PENDENTE')",
+            (txid, recarga.utilizador_id, recarga.valor, valor_bonus_cupom, cupom_nome),
+        )
+        conn.commit()
+
+        return {
+            "payment_id": txid,
+            "copia_cola": resposta_qr.get("qrcode"),
+            "qr_code": resposta_qr.get("imagemQrcode"),
+        }
+
+    except Exception as e:
+        conn.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.get("/recarga/status/{payment_id}")
+def checar_status_pagamento_bd(payment_id: str):
+    """Frontend consulta aqui para saber se a tela deve dar o confete de sucesso"""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT status FROM pedidos_pix WHERE id = %s", (payment_id,))
+        pedido = cursor.fetchone()
+
+        if pedido and pedido["status"] == "CONCLUIDO":
+            return {"status": "PAGO"}
+        return {"status": "PENDENTE"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ==============================================================================
+# ROTAS GERAIS E LÓGICA DE NEGÓCIO
 # ==============================================================================
 
 
@@ -928,135 +1201,6 @@ def mudar_senha(req: MudarSenhaRequest):
     cursor.close()
     conn.close()
     return {"mensagem": "Senha alterada com sucesso!"}
-
-
-# ==============================================================================
-# CHECKOUT DA STRIPE (Substitui a criação do QR Code Asaas)
-# ==============================================================================
-@app.post("/recarga/checkout")
-def gerar_checkout_stripe(recarga: NovaRecarga):
-    if recarga.valor < 30.0:
-        raise HTTPException(
-            status_code=400, detail="O valor mínimo de recarga é R$ 30,00."
-        )
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-    try:
-        valor_bonus_cupom = 0.0
-        cupom_id = None
-
-        if recarga.cupom:
-            cursor.execute(
-                "SELECT id, tipo, valor FROM cupons WHERE codigo = %s AND ativo = TRUE",
-                (recarga.cupom.upper(),),
-            )
-            cupom = cursor.fetchone()
-            if not cupom:
-                raise HTTPException(
-                    status_code=404, detail="Cupom inválido ou expirado."
-                )
-
-            cursor.execute(
-                "SELECT id FROM cupons_usados WHERE utilizador_id = %s AND cupom_id = %s",
-                (recarga.utilizador_id, cupom["id"]),
-            )
-            if cursor.fetchone():
-                raise HTTPException(
-                    status_code=400, detail="Você já utilizou este cupom promocional."
-                )
-
-            cupom_id = cupom["id"]
-            if cupom["tipo"] == "FIXO":
-                valor_bonus_cupom = cupom["valor"]
-            elif cupom["tipo"] == "PORCENTAGEM":
-                valor_bonus_cupom = recarga.valor * (cupom["valor"] / 100.0)
-
-        cursor.execute(
-            "SELECT email FROM utilizadores WHERE id = %s",
-            (recarga.utilizador_id,),
-        )
-        usr = cursor.fetchone()
-
-        # Cria a sessão de checkout na Stripe
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card", "pix"],
-            customer_email=usr["email"],
-            line_items=[
-                {
-                    "price_data": {
-                        "currency": "brl",
-                        "product_data": {
-                            "name": "Recarga de Carteira - BORA JOGAR",
-                            "description": "Adição de fundos para locação de jogos PS5",
-                        },
-                        "unit_amount": int(
-                            recarga.valor * 100
-                        ),  # Stripe trabalha em centavos
-                    },
-                    "quantity": 1,
-                }
-            ],
-            mode="payment",
-            success_url=URL_SUCESSO_FRONTEND,
-            cancel_url=URL_CANCELAMENTO_FRONTEND,
-            metadata={
-                "utilizador_id": str(recarga.utilizador_id),
-                "valor_pago": str(recarga.valor),
-                "valor_bonus": str(valor_bonus_cupom),
-                "cupom": recarga.cupom.upper() if recarga.cupom else "",
-            },
-        )
-
-        # Salva o pedido pendente com a ID da sessão Stripe para rastreio
-        cupom_nome = recarga.cupom.upper() if recarga.cupom else ""
-        cursor.execute(
-            "INSERT INTO pedidos_pix (id, utilizador_id, valor_pago, valor_bonus, cupom, status) VALUES (%s, %s, %s, %s, %s, 'PENDENTE')",
-            (
-                session.id,
-                recarga.utilizador_id,
-                recarga.valor,
-                valor_bonus_cupom,
-                cupom_nome,
-            ),
-        )
-        conn.commit()
-
-        # Retorna a URL segura de pagamento para o frontend redirecionar o usuário
-        return {"checkout_url": session.url, "payment_id": session.id}
-
-    except Exception as e:
-        conn.rollback()
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-
-# Agora o front-end pode chamar essa rota de forma muito mais leve,
-# apenas para consultar se o banco de dados já foi atualizado pelo webhook
-@app.get("/recarga/status/{payment_id}")
-def checar_status_pagamento_bd(payment_id: str):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    try:
-        cursor.execute(
-            "SELECT status FROM pedidos_pix WHERE id = %s",
-            (payment_id,),
-        )
-        pedido = cursor.fetchone()
-
-        if pedido and pedido["status"] == "CONCLUIDO":
-            return {"status": "PAGO"}
-
-        return {"status": "PENDENTE"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
 
 
 @app.post("/devolver")
