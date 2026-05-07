@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import psycopg2
@@ -15,6 +15,7 @@ import string
 import requests
 import urllib.request
 import json
+import stripe  # NOVA INTEGRAÇÃO
 
 app = FastAPI(title="API Locadora PS5")
 
@@ -31,11 +32,15 @@ ALGORITHM = "HS256"
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ==============================================================================
-# INTEGRAÇÕES (Asaas)
+# INTEGRAÇÕES (Stripe)
 # ==============================================================================
-ASAAS_API_KEY = os.getenv("ASAAS_API_KEY")
-ASAAS_URL = "https://api.asaas.com/v3"
-HEADERS_ASAAS = {"access_token": ASAAS_API_KEY, "Content-Type": "application/json"}
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+# URL para onde a Stripe envia o cliente após o pagamento no checkout deles
+URL_SUCESSO_FRONTEND = os.getenv("FRONTEND_URL", "http://localhost:3000") + "/sucesso"
+URL_CANCELAMENTO_FRONTEND = (
+    os.getenv("FRONTEND_URL", "http://localhost:3000") + "/carteira"
+)
 
 
 def gerar_hash_senha(senha):
@@ -56,9 +61,7 @@ security = HTTPBearer()
 
 
 def verificar_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = (
-        credentials.credentials
-    )  # O FastAPI já arranca a palavra "Bearer " para você!
+    token = credentials.credentials
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         if not payload.get("is_admin"):
@@ -79,6 +82,9 @@ def gerar_codigo_convite(nome):
     return f"{letras}{nums}"
 
 
+# ==============================================================================
+# MODELOS PYDANTIC
+# ==============================================================================
 class UsuarioNovo(BaseModel):
     nome: str
     email: str
@@ -220,6 +226,131 @@ class CancelarReserva(BaseModel):
     notificacao_id: int = 0
 
 
+# ==============================================================================
+# WEBHOOK STRIPE (Processamento Automático e Seguro de Pagamentos)
+# ==============================================================================
+@app.post("/api/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    # A Stripe exige o corpo "cru" da requisição para verificar a assinatura
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        print("⚠️ Payload inválido!")
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        print("⚠️ Assinatura Stripe inválida! Tentativa de fraude bloqueada.")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+
+        # Só processa se o pagamento foi concluído de fato (evita boletos/pix pendentes)
+        if session.payment_status == "paid":
+            processar_sucesso_pagamento(session)
+
+    elif event["type"] == "checkout.session.async_payment_succeeded":
+        # Caso o Pix demore um pouco e seja aprovado assincronamente
+        session = event["data"]["object"]
+        processar_sucesso_pagamento(session)
+
+    return {"status": "success"}
+
+
+def processar_sucesso_pagamento(session):
+    payment_id = session.id
+
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Verifica se já não processamos esse pagamento
+        cursor.execute("SELECT status FROM pedidos_pix WHERE id = %s", (payment_id,))
+        pedido = cursor.fetchone()
+
+        if pedido and pedido["status"] == "PENDENTE":
+            user_id = int(session.metadata.get("utilizador_id"))
+            valor_pago = float(session.metadata.get("valor_pago"))
+            valor_bonus = float(session.metadata.get("valor_bonus"))
+            cupom_nome = session.metadata.get("cupom")
+
+            # Verifica se é a primeira recarga para dar bônus de indicação
+            cursor.execute(
+                "SELECT COUNT(*) as qtd FROM transacoes WHERE utilizador_id = %s AND descricao LIKE 'Recarga%%'",
+                (user_id,),
+            )
+            eh_primeira_recarga = cursor.fetchone()["qtd"] == 0
+
+            valor_total = valor_pago + valor_bonus
+
+            # Atualiza saldo do cliente
+            cursor.execute(
+                "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s RETURNING nome, indicado_por",
+                (valor_total, user_id),
+            )
+            cliente = cursor.fetchone()
+
+            # Registra transação principal
+            cursor.execute(
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, 'Recarga via Stripe (Pix/Cartão)')",
+                (user_id, valor_pago),
+            )
+
+            # Lógica de Cupom Promocional
+            if valor_bonus > 0:
+                cursor.execute(
+                    "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
+                    (user_id, valor_bonus, f"🎟️ Bônus Cupom ({cupom_nome})"),
+                )
+                cursor.execute("SELECT id FROM cupons WHERE codigo = %s", (cupom_nome,))
+                cupom_db = cursor.fetchone()
+                if cupom_db:
+                    cursor.execute(
+                        "INSERT INTO cupons_usados (utilizador_id, cupom_id) VALUES (%s, %s)",
+                        (user_id, cupom_db["id"]),
+                    )
+
+            # Lógica de Indicação (Afiliados)
+            if eh_primeira_recarga and cliente["indicado_por"]:
+                id_amigo = cliente["indicado_por"]
+                valor_indicacao = valor_pago * 0.10
+                cursor.execute(
+                    "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s",
+                    (valor_indicacao, id_amigo),
+                )
+                cursor.execute(
+                    "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
+                    (
+                        id_amigo,
+                        valor_indicacao,
+                        f"🎁 Bônus de Indicação ({cliente['nome']})",
+                    ),
+                )
+
+            # Marca pedido como concluído
+            cursor.execute(
+                "UPDATE pedidos_pix SET status = 'CONCLUIDO' WHERE id = %s",
+                (payment_id,),
+            )
+            conn.commit()
+            print(f"💰 Pagamento processado com sucesso! Sessão: {payment_id}")
+
+    except Exception as e:
+        conn.rollback()
+        print(f"⚠️ Erro ao processar pagamento no banco de dados: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ==============================================================================
+# ROTAS DA API
+# ==============================================================================
+
+
 @app.get("/")
 def home():
     return {"mensagem": "API Online"}
@@ -293,14 +424,12 @@ def buscar_enquete(usuario_id: int = 0):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT o.id, o.titulo, o.url_imagem,
                (SELECT COUNT(*) FROM enquete_votos v WHERE v.opcao_id = o.id) as total_votos
         FROM enquete_opcoes o
         ORDER BY o.id ASC
-    """
-    )
+    """)
     opcoes = cursor.fetchall()
 
     voto_usuario = None
@@ -422,8 +551,6 @@ def listar_jogos():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # 🚀 CONSULTA INTELIGENTE FINAL
-        # Resolve o erro 500 repetindo a subquery de contagem no ORDER BY
         query = """
             SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
@@ -431,7 +558,6 @@ def listar_jogos():
                 (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS fila_dias_espera,
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 
-                -- Contagem para o Frontend exibir:
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
                 
                 CASE 
@@ -443,19 +569,11 @@ def listar_jogos():
             FROM jogos j 
             ORDER BY 
                 prioridade_vitrine ASC,
-
-                -- 1️⃣ Linha 1: Jogo que lança mais cedo vem primeiro
                 CASE WHEN j.data_lancamento > CURRENT_DATE THEN j.data_lancamento END ASC,
-
-                -- 2️⃣ Linha 2: Jogo que lançou mais recentemente vem primeiro
                 CASE WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' AND j.data_lancamento <= CURRENT_DATE THEN j.data_lancamento END DESC,
-
-                -- 3️⃣ Linha 3 (Catálogo): POPULARIDADE REAL (O Red Dead vai subir aqui!)
                 CASE WHEN j.data_lancamento < CURRENT_DATE - INTERVAL '180 days' OR j.data_lancamento IS NULL 
                      THEN (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) 
                 END DESC NULLS LAST,
-
-                -- ⚖️ Desempate: Mais novos primeiro
                 j.data_lancamento DESC NULLS LAST;
         """
         cursor.execute(query)
@@ -463,7 +581,6 @@ def listar_jogos():
     except Exception as e:
         conn.rollback()
         print(f"Erro na query principal (rodando fallback): {e}")
-        # 🛡️ Fallback infalível: Ordena por ID decrescente se tudo falhar
         query_segura = """
             SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status ILIKE 'DISPONIVEL') AS estoque,
@@ -512,13 +629,11 @@ def buscar_reservas_usuario(usuario_id: int):
     )
     reservas = cursor.fetchall()
 
-    # 🚀 CALCULA A DATA EXATA BASEADO EM QUEM ESTÁ NA FRENTE
     for r in reservas:
         hoje_str = datetime.now().strftime("%Y-%m-%d")
         eh_pre_venda = r["data_lancamento"] and str(r["data_lancamento"]) >= hoje_str
 
         if eh_pre_venda:
-            # 👑 Fila VIP (Pré-Venda)
             cursor.execute(
                 """
                 SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
@@ -532,7 +647,6 @@ def buscar_reservas_usuario(usuario_id: int):
                 (r["jogo_id"], usuario_id, usuario_id, r["data_solicitacao"]),
             )
         else:
-            # 🚶 Fila Normal (Ordem de chegada)
             cursor.execute(
                 """
                 SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
@@ -816,8 +930,11 @@ def mudar_senha(req: MudarSenhaRequest):
     return {"mensagem": "Senha alterada com sucesso!"}
 
 
-@app.post("/recarga/gerar-pix")
-def gerar_pix_asaas(recarga: NovaRecarga):
+# ==============================================================================
+# CHECKOUT DA STRIPE (Substitui a criação do QR Code Asaas)
+# ==============================================================================
+@app.post("/recarga/checkout")
+def gerar_checkout_stripe(recarga: NovaRecarga):
     if recarga.valor < 30.0:
         raise HTTPException(
             status_code=400, detail="O valor mínimo de recarga é R$ 30,00."
@@ -856,50 +973,47 @@ def gerar_pix_asaas(recarga: NovaRecarga):
                 valor_bonus_cupom = recarga.valor * (cupom["valor"] / 100.0)
 
         cursor.execute(
-            "SELECT nome, email FROM utilizadores WHERE id = %s",
+            "SELECT email FROM utilizadores WHERE id = %s",
             (recarga.utilizador_id,),
         )
         usr = cursor.fetchone()
 
-        payload_cli = {
-            "name": usr["nome"],
-            "email": usr["email"],
-            "cpfCnpj": recarga.cpf,
-        }
-        res_cli = requests.post(
-            f"{ASAAS_URL}/customers", json=payload_cli, headers=HEADERS_ASAAS
+        # Cria a sessão de checkout na Stripe
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card", "pix"],
+            customer_email=usr["email"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "brl",
+                        "product_data": {
+                            "name": "Recarga de Carteira - BORA JOGAR",
+                            "description": "Adição de fundos para locação de jogos PS5",
+                        },
+                        "unit_amount": int(
+                            recarga.valor * 100
+                        ),  # Stripe trabalha em centavos
+                    },
+                    "quantity": 1,
+                }
+            ],
+            mode="payment",
+            success_url=URL_SUCESSO_FRONTEND,
+            cancel_url=URL_CANCELAMENTO_FRONTEND,
+            metadata={
+                "utilizador_id": str(recarga.utilizador_id),
+                "valor_pago": str(recarga.valor),
+                "valor_bonus": str(valor_bonus_cupom),
+                "cupom": recarga.cupom.upper() if recarga.cupom else "",
+            },
         )
-        if res_cli.status_code not in [200, 201]:
-            raise Exception(f"Erro Asaas (Cliente): {res_cli.text}")
-        cli_id = res_cli.json().get("id")
 
-        vencimento = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        payload_cob = {
-            "customer": cli_id,
-            "billingType": "PIX",
-            "value": recarga.valor,
-            "dueDate": vencimento,
-            "description": "Recarga de Carteira - BORA JOGAR",
-        }
-        res_cob = requests.post(
-            f"{ASAAS_URL}/payments", json=payload_cob, headers=HEADERS_ASAAS
-        )
-        if res_cob.status_code not in [200, 201]:
-            raise Exception(f"Erro Asaas (Cobrança): {res_cob.text}")
-        pay_id = res_cob.json().get("id")
-
-        res_qr = requests.get(
-            f"{ASAAS_URL}/payments/{pay_id}/pixQrCode", headers=HEADERS_ASAAS
-        )
-        if res_qr.status_code not in [200, 201]:
-            raise Exception(f"Erro Asaas (QRCode): {res_qr.text}")
-        qr_data = res_qr.json()
-
+        # Salva o pedido pendente com a ID da sessão Stripe para rastreio
         cupom_nome = recarga.cupom.upper() if recarga.cupom else ""
         cursor.execute(
-            "INSERT INTO pedidos_pix (id, utilizador_id, valor_pago, valor_bonus, cupom) VALUES (%s, %s, %s, %s, %s)",
+            "INSERT INTO pedidos_pix (id, utilizador_id, valor_pago, valor_bonus, cupom, status) VALUES (%s, %s, %s, %s, %s, 'PENDENTE')",
             (
-                pay_id,
+                session.id,
                 recarga.utilizador_id,
                 recarga.valor,
                 valor_bonus_cupom,
@@ -908,11 +1022,8 @@ def gerar_pix_asaas(recarga: NovaRecarga):
         )
         conn.commit()
 
-        return {
-            "payment_id": pay_id,
-            "copia_cola": qr_data.get("payload"),
-            "qr_code": qr_data.get("encodedImage"),
-        }
+        # Retorna a URL segura de pagamento para o frontend redirecionar o usuário
+        return {"checkout_url": session.url, "payment_id": session.id}
 
     except Exception as e:
         conn.rollback()
@@ -924,86 +1035,24 @@ def gerar_pix_asaas(recarga: NovaRecarga):
         conn.close()
 
 
+# Agora o front-end pode chamar essa rota de forma muito mais leve,
+# apenas para consultar se o banco de dados já foi atualizado pelo webhook
 @app.get("/recarga/status/{payment_id}")
-def checar_status_pagamento(payment_id: str):
+def checar_status_pagamento_bd(payment_id: str):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        res = requests.get(f"{ASAAS_URL}/payments/{payment_id}", headers=HEADERS_ASAAS)
-        status_asaas = res.json().get("status")
+        cursor.execute(
+            "SELECT status FROM pedidos_pix WHERE id = %s",
+            (payment_id,),
+        )
+        pedido = cursor.fetchone()
 
-        if status_asaas in ["RECEIVED", "CONFIRMED"]:
-            cursor.execute(
-                "SELECT * FROM pedidos_pix WHERE id = %s AND status = 'PENDENTE'",
-                (payment_id,),
-            )
-            pedido = cursor.fetchone()
-
-            if pedido:
-                user_id = pedido["utilizador_id"]
-                valor_pago = pedido["valor_pago"]
-                valor_bonus = pedido["valor_bonus"]
-                cupom_nome = pedido["cupom"]
-
-                cursor.execute(
-                    "SELECT COUNT(*) as qtd FROM transacoes WHERE utilizador_id = %s AND descricao LIKE 'Recarga%%'",
-                    (user_id,),
-                )
-                eh_primeira_recarga = cursor.fetchone()["qtd"] == 0
-
-                valor_total = valor_pago + valor_bonus
-                cursor.execute(
-                    "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s RETURNING nome, indicado_por",
-                    (valor_total, user_id),
-                )
-                cliente = cursor.fetchone()
-
-                cursor.execute(
-                    "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, 'Recarga PIX')",
-                    (user_id, valor_pago),
-                )
-
-                if valor_bonus > 0:
-                    cursor.execute(
-                        "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
-                        (user_id, valor_bonus, f"🎟️ Bônus Cupom ({cupom_nome})"),
-                    )
-                    cursor.execute(
-                        "SELECT id FROM cupons WHERE codigo = %s", (cupom_nome,)
-                    )
-                    cupom_db = cursor.fetchone()
-                    if cupom_db:
-                        cursor.execute(
-                            "INSERT INTO cupons_usados (utilizador_id, cupom_id) VALUES (%s, %s)",
-                            (user_id, cupom_db["id"]),
-                        )
-
-                if eh_primeira_recarga and cliente["indicado_por"]:
-                    id_amigo = cliente["indicado_por"]
-                    valor_indicacao = valor_pago * 0.10
-                    cursor.execute(
-                        "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s",
-                        (valor_indicacao, id_amigo),
-                    )
-                    cursor.execute(
-                        "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
-                        (
-                            id_amigo,
-                            valor_indicacao,
-                            f"🎁 Bônus de Indicação ({cliente['nome']})",
-                        ),
-                    )
-
-                cursor.execute(
-                    "UPDATE pedidos_pix SET status = 'CONCLUIDO' WHERE id = %s",
-                    (payment_id,),
-                )
-                conn.commit()
-                return {"status": "PAGO"}
+        if pedido and pedido["status"] == "CONCLUIDO":
+            return {"status": "PAGO"}
 
         return {"status": "PENDENTE"}
     except Exception as e:
-        conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close()
@@ -1101,7 +1150,6 @@ def entrar_fila(reserva: NovaReserva):
             ),
         )
 
-        # 🚀 LÓGICA DO RANK FURA-FILA COM CÁLCULO DE DATAS CORRIGIDO
         hoje_str = datetime.now().strftime("%Y-%m-%d")
         eh_pre_venda = (
             jogo_info["data_lancamento"]
@@ -1116,7 +1164,6 @@ def entrar_fila(reserva: NovaReserva):
             meus_alugueis_qtd = cursor.fetchone()["qtd"]
 
             if meus_alugueis_qtd > 0:
-                # 1. Pega a Data Base Real (Hoje vs Lançamento vs Próxima Devolução)
                 cursor.execute(
                     "SELECT data_lancamento, (SELECT MIN(data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = %s AND l.status = 'ATIVA') as prox FROM jogos WHERE id = %s",
                     (reserva.jogo_id, reserva.jogo_id),
@@ -1133,7 +1180,6 @@ def entrar_fila(reserva: NovaReserva):
                 if jogo_meta["prox"] and jogo_meta["prox"] > base_date:
                     base_date = jogo_meta["prox"]
 
-                # 2. Busca quem foi "empurrado"
                 cursor.execute(
                     """
                     SELECT f.id, f.utilizador_id,
@@ -1152,9 +1198,6 @@ def entrar_fila(reserva: NovaReserva):
                 bumped = cursor.fetchall()
 
                 for b in bumped:
-                    # 3. A mágica da matemática real:
-                    # Data Antiga = Base + dias de quem já estava na frente
-                    # Data Nova = Data Antiga + dias do VIP que furou a fila
                     dias_antes = b["dias_frente_antes"]
                     data_antiga = base_date + timedelta(days=dias_antes)
                     data_nova = data_antiga + timedelta(days=reserva.dias_aluguel)
@@ -1193,7 +1236,6 @@ def cancelar_reserva(dados: CancelarReserva):
         if not res:
             raise HTTPException(status_code=400, detail="Reserva não encontrada.")
 
-        # 🚀 CORRIGIDO: Busca flexível ignorando espaços exatos
         cursor.execute(
             "SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1",
             (dados.utilizador_id, f"Reserva na Fila%{res['titulo']}%"),
@@ -1313,11 +1355,10 @@ def buscar_estatisticas_admin(
         data_inicio = hoje - timedelta(days=30)
     elif periodo == "ano":
         data_inicio = hoje.replace(month=1, day=1, hour=0, minute=0, second=0)
-    else:  # "tudo"
+    else:
         data_inicio = datetime(2000, 1, 1)
 
     try:
-        # 1. Faturamento respeita o filtro de tempo
         cursor.execute(
             """
             SELECT SUM(valor) as total FROM transacoes 
@@ -1328,13 +1369,11 @@ def buscar_estatisticas_admin(
         )
         faturamento = cursor.fetchone()["total"] or 0.0
 
-        # 2. Total de clientes
         cursor.execute(
             "SELECT COUNT(*) as total FROM utilizadores WHERE is_admin = false"
         )
         clientes = cursor.fetchone()["total"] or 0
 
-        # 3. 🚀 ROLLBACK: Locações ativas neste exato segundo (ignora data)
         cursor.execute("SELECT COUNT(*) as total FROM locacoes WHERE status = 'ATIVA'")
         locacoes_ativas = cursor.fetchone()["total"] or 0
 
@@ -1506,7 +1545,6 @@ def liberar_conta_manutencao(
                 (ultima_loc["id"],),
             )
 
-        # 🚀 LÓGICA DE SELEÇÃO (RANK PARA PRÉ-VENDA, FILA NORMAL PARA LANÇADOS)
         cursor.execute("SELECT data_lancamento FROM jogos WHERE id = %s", (jogo_id,))
         data_lanc = cursor.fetchone()["data_lancamento"]
         hoje_str = datetime.now().strftime("%Y-%m-%d")
@@ -1529,7 +1567,6 @@ def liberar_conta_manutencao(
         proximo_da_fila = cursor.fetchone()
 
         if proximo_da_fila:
-            # 🚀 AGORA ELE RESPEITA SE O CLIENTE PAGOU POR 7 OU 14 DIAS
             dias_comprados = proximo_da_fila.get("dias_aluguel", 7)
             cursor.execute(
                 "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA')",
@@ -1626,7 +1663,6 @@ def listar_todas_reservas(admin_data=Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-    # 1. Puxa os dados básicos e a previsão mínima de devolução do jogo
     query = """
         SELECT f.id, u.nome AS cliente, j.id AS jogo_id, j.titulo AS jogo, j.data_lancamento, f.data_solicitacao, f.status, f.utilizador_id, f.dias_aluguel,
         (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA') AS proxima_devolucao
@@ -1639,13 +1675,11 @@ def listar_todas_reservas(admin_data=Depends(verificar_admin)):
     cursor.execute(query)
     reservas = cursor.fetchall()
 
-    # 2. Aplica a Matemática VIP de Fila para o Admin ver as datas exatas
     for r in reservas:
         hoje_str = datetime.now().strftime("%Y-%m-%d")
         eh_pre_venda = r["data_lancamento"] and str(r["data_lancamento"]) >= hoje_str
 
         if eh_pre_venda:
-            # 👑 Fila VIP (Pré-Venda)
             cursor.execute(
                 """
                 SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
@@ -1664,7 +1698,6 @@ def listar_todas_reservas(admin_data=Depends(verificar_admin)):
                 ),
             )
         else:
-            # 🚶 Fila Normal (Ordem de chegada)
             cursor.execute(
                 """
                 SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
@@ -1684,9 +1717,7 @@ def listar_todas_reservas(admin_data=Depends(verificar_admin)):
             base_date = r["proxima_devolucao"]
 
         est_start_date = base_date + timedelta(days=dias_frente)
-        est_end_date = est_start_date + timedelta(
-            days=r["dias_aluguel"]
-        )  # Calcula o fim (Soma 7 ou 14)
+        est_end_date = est_start_date + timedelta(days=r["dias_aluguel"])
 
         r["data_inicio"] = est_start_date.strftime("%d/%m/%Y")
         r["data_fim"] = est_end_date.strftime("%d/%m/%Y")
@@ -1719,7 +1750,6 @@ def admin_cancelar_reserva(reserva_id: int, admin_data=Depends(verificar_admin))
         usr_id = res["utilizador_id"]
         titulo = res["titulo"]
 
-        # 🚀 CORRIGIDO: Busca flexível ignorando espaços exatos
         cursor.execute(
             "SELECT valor FROM transacoes WHERE utilizador_id = %s AND tipo = 'SAIDA' AND descricao LIKE %s ORDER BY id DESC LIMIT 1",
             (usr_id, f"Reserva na Fila%{titulo}%"),
@@ -1873,16 +1903,13 @@ def processar_filas_automaticamente():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # 1. Acha todos os jogos que têm alguém na fila E têm conta disponível no estoque
-        cursor.execute(
-            """
+        cursor.execute("""
             SELECT DISTINCT f.jogo_id, j.titulo, j.data_lancamento
             FROM fila_espera f
             JOIN jogos j ON f.jogo_id = j.id
             JOIN contas_psn c ON c.jogo_id = j.id
             WHERE f.status = 'AGUARDANDO' AND c.status = 'DISPONIVEL'
-        """
-        )
+        """)
         jogos_pendentes = cursor.fetchall()
 
         hoje_str = datetime.now().strftime("%Y-%m-%d")
@@ -1894,11 +1921,9 @@ def processar_filas_automaticamente():
                 str(jp["data_lancamento"]) if jp["data_lancamento"] else None
             )
 
-            # 2. Trava de Segurança: Só libera se a data de lançamento já chegou (ou passou)
             if data_lanc_str and data_lanc_str > hoje_str:
-                continue  # Ainda está no futuro (Pré-venda), não faz nada.
+                continue
 
-            # 3. Pega todas as contas disponíveis no cofre para este jogo
             cursor.execute(
                 "SELECT id FROM contas_psn WHERE jogo_id = %s AND status = 'DISPONIVEL'",
                 (jogo_id,),
@@ -1906,7 +1931,6 @@ def processar_filas_automaticamente():
             contas_disponiveis = cursor.fetchall()
 
             for conta in contas_disponiveis:
-                # 4. Pega o PRÓXIMO da fila (Respeitando a data de lançamento)
                 eh_pre_venda = data_lanc_str and str(data_lanc_str) >= hoje_str
 
                 if eh_pre_venda:
@@ -1925,7 +1949,6 @@ def processar_filas_automaticamente():
                 proximo = cursor.fetchone()
 
                 if proximo:
-                    # 5. A mágica acontece: Transforma a Reserva em Locação Ativa silenciosamente
                     cursor.execute(
                         "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA')",
                         (
@@ -1943,7 +1966,6 @@ def processar_filas_automaticamente():
                         (conta["id"],),
                     )
 
-                    # 6. Manda a notificação de alegria pro cliente!
                     msg = f"🎉 SEU ACESSO FOI LIBERADO! O jogo {titulo} acabou de lançar e a sua conta já está na aba 'Meus Acessos'. Bom jogo!"
                     cursor.execute(
                         "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
@@ -1952,7 +1974,7 @@ def processar_filas_automaticamente():
 
                     conn.commit()
                 else:
-                    break  # Acabaram as pessoas na fila para este jogo, sobra a conta no estoque
+                    break
 
     except Exception as e:
         conn.rollback()
@@ -1962,9 +1984,6 @@ def processar_filas_automaticamente():
         conn.close()
 
 
-# ====================================================================
-# ROTA DE EMERGÊNCIA (Para você rodar agora sem esperar 1 minuto)
-# ====================================================================
 @app.post("/admin/forcar-processamento-filas")
 def forcar_filas(admin_data=Depends(verificar_admin)):
     processar_filas_automaticamente()
@@ -1988,37 +2007,31 @@ def buscar_saldo_real(usuario_id: int):
 
 @app.on_event("startup")
 def iniciar_servicos():
-    # 🚀 TENTA CONECTAR NO BANCO, MAS SE DER ERRO DE REDE, NÃO DERRUBA O SERVIDOR
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # 1. Cria a tabela de Notificações
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS notificacoes (
                 id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255),
                 mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """
-        )
+        """)
         conn.commit()
 
-        # 2. Tenta adicionar a coluna de dias (Isolado em um Try/Catch)
         try:
             cursor.execute(
                 "ALTER TABLE fila_espera ADD COLUMN dias_aluguel INT DEFAULT 7"
             )
             conn.commit()
         except Exception:
-            conn.rollback()  # Ignora pacificamente se a coluna já existir
+            conn.rollback()
 
         cursor.close()
         conn.close()
     except Exception as e:
         print(f"⚠️ AVISO DE STARTUP: Banco de dados ainda acordando. Detalhe: {e}")
 
-    # Inicia a checagem de devolução e processamento de filas de 1 em 1 minuto
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, "interval", minutes=1)
     scheduler.add_job(processar_filas_automaticamente, "interval", minutes=1)
