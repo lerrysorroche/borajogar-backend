@@ -470,8 +470,11 @@ def gerar_checkout_stripe(recarga: NovaRecarga):
         )
         usr = cursor.fetchone()
 
+        # PEGA A URL BASE DO RENDER OU USA LOCALHOST
+        base_frontend = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
         session = stripe.checkout.Session.create(
-            payment_method_types=["card"],  # Exclusivo Cartão
+            payment_method_types=["card"],
             customer_email=usr["email"],
             line_items=[
                 {
@@ -479,7 +482,7 @@ def gerar_checkout_stripe(recarga: NovaRecarga):
                         "currency": "brl",
                         "product_data": {
                             "name": "Recarga de Carteira - BORA JOGAR",
-                            "description": "Adição de fundos para locação de jogos PS5",
+                            "description": "Adição de fundos para locação de jogos PS5.",
                         },
                         "unit_amount": int(recarga.valor * 100),
                     },
@@ -487,8 +490,9 @@ def gerar_checkout_stripe(recarga: NovaRecarga):
                 }
             ],
             mode="payment",
-            success_url=URL_SUCESSO_FRONTEND,
-            cancel_url=URL_CANCELAMENTO_FRONTEND,
+            # A STRIPE VAI SUBSTITUIR O {CHECKOUT_SESSION_ID} PELA ID REAL DA SESSÃO
+            success_url=f"{base_frontend}/?aba=dashboard&stripe_session={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{base_frontend}/?aba=dashboard&stripe_cancelado=true",
             metadata={
                 "utilizador_id": str(recarga.utilizador_id),
                 "valor_pago": str(recarga.valor),
@@ -670,6 +674,46 @@ def checar_status_pagamento_inteligente(payment_id: str):
                 return {"status": "PAGO"}
         except Exception as e:
             print(f"Erro ao consultar fallback na Efí: {e}")
+
+        return {"status": "PENDENTE"}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.get("/recarga/status-stripe/{session_id}")
+def checar_status_stripe_inteligente(session_id: str):
+    """Quando o cliente volta da Stripe, o site checa aqui se ele pagou mesmo"""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute(
+            "SELECT status, utilizador_id, valor_pago, valor_bonus, cupom FROM pedidos_pix WHERE id = %s",
+            (session_id,),
+        )
+        pedido = cursor.fetchone()
+
+        if not pedido:
+            return {"status": "NAO_ENCONTRADO"}
+
+        if pedido["status"] == "CONCLUIDO":
+            return {"status": "PAGO"}
+
+        # 🚀 FALLBACK ATIVO: Pergunta diretamente para a Stripe
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+            if session.payment_status == "paid":
+                # Processa o pagamento, o bônus, o afiliado, tudo de uma vez!
+                processar_sucesso_pagamento(
+                    payment_id=session_id,
+                    user_id=pedido["utilizador_id"],
+                    valor_pago=pedido["valor_pago"],
+                    valor_bonus=pedido["valor_bonus"],
+                    cupom_nome=pedido["cupom"],
+                )
+                return {"status": "PAGO"}
+        except Exception as e:
+            print(f"Erro ao consultar fallback Stripe: {e}")
 
         return {"status": "PENDENTE"}
     finally:
