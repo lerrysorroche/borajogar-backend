@@ -23,7 +23,11 @@ URL_CANCELAMENTO_FRONTEND = (
 EFI_CLIENT_ID = os.getenv("EFI_CLIENT_ID")
 EFI_CLIENT_SECRET = os.getenv("EFI_CLIENT_SECRET")
 EFI_CHAVE_PIX = os.getenv("EFI_CHAVE_PIX")
-EFI_CERT_PATH = "certificado_efi.pem"
+
+# --- CORREÇÃO AQUI: Forçando o caminho absoluto do certificado ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EFI_CERT_PATH = os.path.join(BASE_DIR, "certificado_efi.pem")
+
 credentials_efi = {
     "client_id": EFI_CLIENT_ID,
     "client_secret": EFI_CLIENT_SECRET,
