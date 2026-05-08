@@ -4,6 +4,7 @@ import os
 import stripe
 import random
 import string
+import base64  # <-- IMPORTANTE PARA DECODIFICAR O CERTIFICADO
 from efipay import EfiPay
 
 from database import get_db_connection
@@ -12,7 +13,9 @@ from models import NovaRecarga, NovoCupom
 
 router = APIRouter(tags=["Pagamentos"])
 
+# ==========================================
 # Configurações Gateways
+# ==========================================
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 URL_SUCESSO_FRONTEND = os.getenv("FRONTEND_URL", "http://localhost:3000") + "/sucesso"
@@ -24,9 +27,19 @@ EFI_CLIENT_ID = os.getenv("EFI_CLIENT_ID")
 EFI_CLIENT_SECRET = os.getenv("EFI_CLIENT_SECRET")
 EFI_CHAVE_PIX = os.getenv("EFI_CHAVE_PIX")
 
-# --- CORREÇÃO AQUI: Forçando o caminho absoluto do certificado ---
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EFI_CERT_PATH = os.path.join(BASE_DIR, "certificado_efi.pem")
+# 🚀 A MÁGICA DO RENDER: Lendo o certificado do Environment Variable
+EFI_CERT_BASE64 = os.getenv("EFI_CERT_BASE64")
+EFI_CERT_PATH = "/tmp/certificado_cert.pem"  # O Render permite gravar na pasta /tmp
+
+if EFI_CERT_BASE64:
+    try:
+        # Decodifica o texto gigante da variável e cria o arquivo físico .pem
+        with open(EFI_CERT_PATH, "wb") as cert_file:
+            cert_file.write(base64.b64decode(EFI_CERT_BASE64))
+    except Exception as e:
+        print(f"Erro ao decodificar o certificado Efí: {e}")
+else:
+    print("⚠️ AVISO CRÍTICO: Variável EFI_CERT_BASE64 não encontrada no Render!")
 
 credentials_efi = {
     "client_id": EFI_CLIENT_ID,
