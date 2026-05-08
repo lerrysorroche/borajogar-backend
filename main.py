@@ -31,6 +31,30 @@ def home():
     return {"mensagem": "API Online e Modularizada 🚀"}
 
 
+@app.get("/configuracoes")
+def get_config():
+    """Rota pública para o frontend puxar os Banners e as Regras do Sistema"""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute(
+        "SELECT devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url FROM configuracoes LIMIT 1"
+    )
+    config = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return (
+        config
+        if config
+        else {
+            "devolucao_dinamica": False,
+            "valor_por_dia": 2.0,
+            "anuncio_ativo": False,
+            "mensagem_anuncio": "",
+            "banners_url": "",
+        }
+    )
+
+
 # ==============================================================================
 # MOTOR DE TAREFAS AUTOMÁTICAS (CRON JOBS)
 # ==============================================================================

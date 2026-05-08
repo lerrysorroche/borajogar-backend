@@ -15,6 +15,7 @@ from models import (
     MudarSenhaRequest,
     EditarClienteRequest,
     AjusteSaldoRequest,
+    LerNotificacao,
 )
 
 router = APIRouter(tags=["Usuarios"])
@@ -232,3 +233,73 @@ def ler_notificacao(dados: LerNotificacao):
     cursor.close()
     conn.close()
     return {"status": "ok"}
+
+
+@router.get("/usuarios")
+def listar_usuarios(admin_data=Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute(
+        "SELECT id, nome, email, telefone, saldo, is_admin FROM utilizadores ORDER BY nome ASC"
+    )
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
+
+
+@router.put("/usuarios/{usuario_id}")
+def editar_usuario(
+    usuario_id: int, dados: EditarClienteRequest, admin_data=Depends(verificar_admin)
+):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT saldo FROM utilizadores WHERE id = %s", (usuario_id,))
+        usuario_db = cursor.fetchone()
+        if not usuario_db:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        saldo_atual = float(usuario_db["saldo"])
+        novo_saldo = float(dados.saldo)
+        if saldo_atual != novo_saldo:
+            diferenca = novo_saldo - saldo_atual
+            tipo_transacao = "ENTRADA" if diferenca > 0 else "SAIDA"
+            motivo = (
+                dados.motivo_ajuste
+                if dados.motivo_ajuste.strip()
+                else "Ajuste Administrativo"
+            )
+            cursor.execute(
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, %s, %s, %s)",
+                (usuario_id, tipo_transacao, abs(diferenca), motivo),
+            )
+        cursor.execute(
+            "UPDATE utilizadores SET nome = %s, email = %s, telefone = %s, saldo = %s WHERE id = %s",
+            (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id),
+        )
+        conn.commit()
+        return {"mensagem": "Cliente atualizado com sucesso!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.delete("/usuarios/{usuario_id}")
+def deletar_usuario(usuario_id: int, admin_data=Depends(verificar_admin)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM utilizadores WHERE id = %s", (usuario_id,))
+        conn.commit()
+        return {"mensagem": "Usuário removido com sucesso"}
+    except Exception:
+        conn.rollback()
+        raise HTTPException(
+            status_code=400, detail="Erro: Este usuário possui histórico."
+        )
+    finally:
+        cursor.close()
+        conn.close()
