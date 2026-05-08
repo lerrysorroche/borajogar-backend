@@ -403,23 +403,6 @@ async def efi_webhook(request: Request):
         raise HTTPException(status_code=500, detail="Erro interno")
 
 
-@app.get("/admin/registrar-webhook-efi")
-def registrar_webhook(admin_data=Depends(verificar_admin)):
-    """Rota administrativa para atrelar o servidor à Efí uma única vez"""
-    efi = EfiPay(credentials_efi)
-
-    # Monta a URL baseado no servidor atual
-    backend_url = os.getenv("BACKEND_URL", "https://api-bora-jogar.onrender.com")
-    webhook_url = f"{backend_url}/api/webhooks/efi"
-
-    body = {"webhookUrl": webhook_url}
-    try:
-        resposta = efi.pix_config_webhook(params={"chave": EFI_CHAVE_PIX}, body=body)
-        return resposta
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
 # ==============================================================================
 # CHECKOUTS E GERAÇÃO DE PAGAMENTOS
 # ==============================================================================
