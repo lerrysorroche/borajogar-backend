@@ -6,6 +6,8 @@ from datetime import datetime
 
 from database import get_db_connection
 from routes import usuarios, jogos, pagamentos, alugueis, admin
+from routes.pagamentos import processar_sucesso_pagamento, credentials_efi
+from efipay import EfiPay
 
 app = FastAPI(title="API Locadora PS5")
 
@@ -157,6 +159,44 @@ def processar_filas_automaticamente():
         conn.close()
 
 
+def verificar_pix_perdidos():
+    """Robô que roda a cada 1 minuto caçando Pix que o cliente pagou e fechou o site"""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Busca todos os pedidos que ainda estão pendentes
+        cursor.execute(
+            "SELECT id, utilizador_id, valor_pago, valor_bonus, cupom FROM pedidos_pix WHERE status = 'PENDENTE'"
+        )
+        pendentes = cursor.fetchall()
+
+        if pendentes:
+            efi = EfiPay(credentials_efi)
+            for pedido in pendentes:
+                txid = pedido["id"]
+
+                # Se não for Stripe (Stripe começa com cs_), é Pix da Efí
+                if not txid.startswith("cs_"):
+                    try:
+                        detalhes = efi.pix_detail_charge(params={"txid": txid})
+                        if detalhes.get("status") == "CONCLUIDA":
+                            print(f"💰 PIX PERDIDO RECUPERADO! TXID: {txid}")
+                            processar_sucesso_pagamento(
+                                txid,
+                                pedido["utilizador_id"],
+                                pedido["valor_pago"],
+                                pedido["valor_bonus"],
+                                pedido["cupom"],
+                            )
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"Erro no rastreador de Pix: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.post("/admin/forcar-processamento-filas", tags=["Admin"])
 def forcar_filas():
     processar_filas_automaticamente()
@@ -187,4 +227,5 @@ def iniciar_servicos():
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, "interval", minutes=1)
     scheduler.add_job(processar_filas_automaticamente, "interval", minutes=1)
+    scheduler.add_job(verificar_pix_perdidos, "interval", minutes=1)
     scheduler.start()
