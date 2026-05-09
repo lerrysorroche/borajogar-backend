@@ -102,75 +102,78 @@ def fazer_login(login: LoginRequest):
 def login_google(req: GoogleLoginRequest):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-    # 1. Verifica se o e-mail do Google já existe no banco
-    cursor.execute(
-        "SELECT id, nome, email, is_admin, saldo, codigo_indicacao FROM utilizadores WHERE email = %s;",
-        (req.email,),
-    )
-    usuario = cursor.fetchone()
-
-    if usuario:
-        # Se existe, faz login normal
-        token = criar_token_acesso(
-            {
-                "id": usuario["id"],
-                "email": usuario["email"],
-                "is_admin": usuario["is_admin"],
-            }
+    try:
+        # 1. Verifica se o e-mail do Google já existe no banco
+        cursor.execute(
+            "SELECT id, nome, email, is_admin, saldo, codigo_indicacao FROM utilizadores WHERE email = %s;",
+            (req.email,),
         )
-        usuario["saldo"] = float(usuario["saldo"])
+        usuario = cursor.fetchone()
+
+        if usuario:
+            token = criar_token_acesso(
+                {
+                    "id": usuario["id"],
+                    "email": usuario["email"],
+                    "is_admin": usuario["is_admin"],
+                }
+            )
+            usuario["saldo"] = float(usuario["saldo"])
+            return {
+                "mensagem": "Login aprovado",
+                "usuario": usuario,
+                "token": token,
+                "novo_usuario": False,
+            }
+        else:
+            if not req.telefone:
+                return {"mensagem": "precisa_telefone", "novo_usuario": True}
+
+            # 2. Criação da conta nova blindada
+            import random
+            import string
+
+            # Cria um código aleatório exclusivo para o cliente
+            meu_codigo = "".join(
+                random.choices(string.ascii_uppercase + string.digits, k=6)
+            )
+            senha_segura = gerar_hash_senha("GoogleAuth123!")
+
+            cursor.execute(
+                "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                (req.nome, req.email, senha_segura, req.telefone, meu_codigo),
+            )
+            novo_id = cursor.fetchone()["id"]  # <-- AQUI ESTAVA O BUG DO [0]!
+            conn.commit()
+
+            cursor.execute(
+                "SELECT id, nome, email, is_admin, saldo, codigo_indicacao FROM utilizadores WHERE id = %s;",
+                (novo_id,),
+            )
+            novo_usuario = cursor.fetchone()
+            token = criar_token_acesso(
+                {
+                    "id": novo_usuario["id"],
+                    "email": novo_usuario["email"],
+                    "is_admin": novo_usuario["is_admin"],
+                }
+            )
+            novo_usuario["saldo"] = float(novo_usuario["saldo"])
+
+            return {
+                "mensagem": "Conta criada com sucesso!",
+                "usuario": novo_usuario,
+                "token": token,
+                "novo_usuario": False,
+            }
+
+    except Exception as e:
+        conn.rollback()
+        print(f"🔥 ERRO CRÍTICO NO GOOGLE LOGIN: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
         cursor.close()
         conn.close()
-        return {
-            "mensagem": "Login aprovado",
-            "usuario": usuario,
-            "token": token,
-            "novo_usuario": False,
-        }
-    else:
-        # Se não existe, verifica se o Frontend mandou o telefone
-        if not req.telefone:
-            cursor.close()
-            conn.close()
-            # Devolve um aviso exigindo o telefone
-            return {"mensagem": "precisa_telefone", "novo_usuario": True}
-
-        # Se tem telefone, cria a conta nova!
-        meu_codigo = gerar_codigo_convite(req.nome)
-        senha_segura = gerar_hash_senha(
-            "GoogleAuth123!"
-        )  # Senha fictícia, já que o login é pelo Google
-
-        cursor.execute(
-            "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
-            (req.nome, req.email, senha_segura, req.telefone, meu_codigo),
-        )
-        novo_id = cursor.fetchone()[0]
-        conn.commit()
-
-        cursor.execute(
-            "SELECT id, nome, email, is_admin, saldo, codigo_indicacao FROM utilizadores WHERE id = %s;",
-            (novo_id,),
-        )
-        novo_usuario = cursor.fetchone()
-        token = criar_token_acesso(
-            {
-                "id": novo_usuario["id"],
-                "email": novo_usuario["email"],
-                "is_admin": novo_usuario["is_admin"],
-            }
-        )
-        novo_usuario["saldo"] = float(novo_usuario["saldo"])
-
-        cursor.close()
-        conn.close()
-        return {
-            "mensagem": "Conta criada com sucesso!",
-            "usuario": novo_usuario,
-            "token": token,
-            "novo_usuario": False,
-        }
 
 
 @router.post("/esqueci-senha")
