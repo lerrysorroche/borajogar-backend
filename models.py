@@ -140,3 +140,9 @@ class CancelarReserva(BaseModel):
     reserva_id: int
     utilizador_id: int
     notificacao_id: int = 0
+
+
+class GoogleLoginRequest(BaseModel):
+    email: str
+    nome: str
+    telefone: str = ""
