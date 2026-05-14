@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from psycopg2.extras import RealDictCursor
@@ -35,26 +36,23 @@ def home():
 
 @app.get("/configuracoes")
 def get_config():
-    """Rota pública para o frontend puxar os Banners e as Regras do Sistema"""
     conn = get_db_connection()
+    # RealDictCursor garante que o Python transforme as colunas em JSON com os nomes corretos
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute(
-        "SELECT devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url FROM configuracoes LIMIT 1"
-    )
-    config = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    return (
-        config
-        if config
-        else {
-            "devolucao_dinamica": False,
-            "valor_por_dia": 2.0,
-            "anuncio_ativo": False,
-            "mensagem_anuncio": "",
-            "banners_url": "",
-        }
-    )
+    try:
+        cursor.execute("SELECT * FROM configuracoes LIMIT 1")
+        config = cursor.fetchone()
+
+        if config:
+            return config
+        else:
+            return {}  # Retorna vazio se a tabela não existir ainda
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 
 # ==============================================================================
