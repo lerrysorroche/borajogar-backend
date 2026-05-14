@@ -22,33 +22,58 @@ router = APIRouter(
 def set_config(dados: ConfigRequest, admin_data=Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM configuracoes LIMIT 1")
-    if cursor.fetchone():
-        cursor.execute(
-            "UPDATE configuracoes SET devolucao_dinamica = %s, valor_por_dia = %s, anuncio_ativo = %s, mensagem_anuncio = %s, banners_url = %s",
-            (
-                dados.devolucao_dinamica,
-                dados.valor_por_dia,
-                dados.anuncio_ativo,
-                dados.mensagem_anuncio,
-                dados.banners_url,
-            ),
-        )
-    else:
-        cursor.execute(
-            "INSERT INTO configuracoes (devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url) VALUES (%s, %s, %s, %s, %s)",
-            (
-                dados.devolucao_dinamica,
-                dados.valor_por_dia,
-                dados.anuncio_ativo,
-                dados.mensagem_anuncio,
-                dados.banners_url,
-            ),
-        )
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"mensagem": "Configurações salvas!"}
+    try:
+        cursor.execute("SELECT id FROM configuracoes LIMIT 1")
+        if cursor.fetchone():
+            cursor.execute(
+                """
+                UPDATE configuracoes 
+                SET devolucao_dinamica = %s, 
+                    valor_por_dia = %s, 
+                    anuncio_ativo = %s, 
+                    mensagem_anuncio = %s, 
+                    banners_url = %s,
+                    enquete_titulo = %s,
+                    enquete_subtitulo = %s
+                """,
+                (
+                    dados.devolucao_dinamica,
+                    dados.valor_por_dia,
+                    dados.anuncio_ativo,
+                    dados.mensagem_anuncio,
+                    dados.banners_url,
+                    dados.enquete_titulo,
+                    dados.enquete_subtitulo,
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO configuracoes 
+                (devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url, enquete_titulo, enquete_subtitulo) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    dados.devolucao_dinamica,
+                    dados.valor_por_dia,
+                    dados.anuncio_ativo,
+                    dados.mensagem_anuncio,
+                    dados.banners_url,
+                    dados.enquete_titulo,
+                    dados.enquete_subtitulo,
+                ),
+            )
+        conn.commit()
+        return {"mensagem": "Configurações salvas!"}
+
+    except Exception as e:
+        conn.rollback()  # Desfaz qualquer alteração pela metade se der erro
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # O finally garante que essas duas linhas rodem SEMPRE, mesmo com erro
+        cursor.close()
+        conn.close()
 
 
 @router.get("/estatisticas")

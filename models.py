@@ -90,6 +90,10 @@ class ConfigRequest(BaseModel):
     anuncio_ativo: bool
     mensagem_anuncio: str
     banners_url: str = ""
+    enquete_titulo: str = "Próximas Adições: Você Decide!"
+    enquete_subtitulo: str = (
+        "Vote no jogo que você mais quer ver no catálogo e ajude a BORA JOGAR! a crescer."
+    )
 
 
 class DevolucaoRequest(BaseModel):
