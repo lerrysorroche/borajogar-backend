@@ -227,13 +227,15 @@ def liberar_conta_manutencao(
             (dados.conta_psn_id,),
         )
         ultima_loc = cursor.fetchone()
+
+        # Injeta o dinheiro na carteira e gera o extrato gamificado
         if ultima_loc and ultima_loc["cashback_pendente"] > 0:
             cash, usr = ultima_loc["cashback_pendente"], ultima_loc["utilizador_id"]
             cursor.execute(
                 "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s", (cash, usr)
             )
             cursor.execute(
-                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, '♻️ Cashback Devolução Antecipada')",
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, '♻️ Recompensa: Devolução Premium')",
                 (usr, cash),
             )
             cursor.execute(
@@ -273,13 +275,13 @@ def liberar_conta_manutencao(
                 "UPDATE contas_psn SET status = 'ALUGADA' WHERE id = %s",
                 (dados.conta_psn_id,),
             )
-            msg = "Senha alterada! A conta foi entregue para o próximo da fila."
+            msg = "Senha alterada! A conta foi entregue para o próximo da fila e a recompensa foi paga."
         else:
             cursor.execute(
                 "UPDATE contas_psn SET status = 'DISPONIVEL' WHERE id = %s",
                 (dados.conta_psn_id,),
             )
-            msg = "Senha alterada! A conta agora está DISPONÍVEL na vitrine."
+            msg = "Senha alterada! A conta agora está DISPONÍVEL na vitrine e a recompensa foi paga."
 
         conn.commit()
         return {"mensagem": msg}
