@@ -97,6 +97,7 @@ def devolver_jogo(dados: DevolucaoRequest):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # Extrai as horas exatas que faltam para a locação expirar
         cursor.execute(
             "SELECT status, conta_psn_id, EXTRACT(EPOCH FROM (data_fim - CURRENT_TIMESTAMP))/3600 AS horas FROM locacoes WHERE id = %s AND utilizador_id = %s",
             (dados.locacao_id, dados.utilizador_id),
@@ -107,25 +108,29 @@ def devolver_jogo(dados: DevolucaoRequest):
                 status_code=400, detail="Locação não encontrada ou já expirada."
             )
 
-        cursor.execute(
-            "SELECT devolucao_dinamica, valor_por_dia FROM configuracoes LIMIT 1"
-        )
+        # Busca o multiplicador financeiro nas configurações (padrão R$ 2.00)
+        cursor.execute("SELECT valor_por_dia FROM configuracoes LIMIT 1")
         config = cursor.fetchone()
-        cashback = 0.0
-        if config and config["devolucao_dinamica"] and loc["horas"] > 24:
-            dias_restantes = int(loc["horas"] // 24)
-            cashback = dias_restantes * config["valor_por_dia"]
+
+        # Lógica Gamificada: Recompensa Base + (Dias Restantes * Recompensa)
+        valor_base = float(config["valor_por_dia"]) if config else 2.0
+        horas = float(loc["horas"])
+        dias_restantes = max(0, int(horas // 24))  # Não permite dias negativos
+
+        cashback_recompensa = valor_base + (dias_restantes * valor_base)
 
         cursor.execute(
             "UPDATE locacoes SET status = 'EXPIRADA', cashback_pendente = %s, data_fim = CURRENT_TIMESTAMP WHERE id = %s",
-            (cashback, dados.locacao_id),
+            (cashback_recompensa, dados.locacao_id),
         )
         cursor.execute(
             "UPDATE contas_psn SET status = 'MANUTENCAO' WHERE id = %s",
             (loc["conta_psn_id"],),
         )
         conn.commit()
-        return {"mensagem": "Devolução solicitada! O jogo foi para análise."}
+        return {
+            "mensagem": "Devolução confirmada! A recompensa cairá na carteira após nossa análise."
+        }
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))
