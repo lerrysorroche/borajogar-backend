@@ -55,12 +55,40 @@ def listar_jogos():
     return resultados
 
 
+@router.get("/jogos/novidades")
+def listar_novidades_locadora():
+    conn = get_db_connection()
+    cursor = conn.cursor(
+        cursor_factory=RealDictCursor
+    )  # Retorna como dicionário igual às outras rotas
+    try:
+        # Pega apenas os 5 maiores IDs cadastrados
+        cursor.execute(
+            "SELECT id, titulo, url_imagem, recomendacao_cliente FROM jogos ORDER BY id DESC LIMIT 5"
+        )
+        novidades = cursor.fetchall()
+        return novidades
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"Erro ao buscar novidades: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.post("/jogos", status_code=201)
 def cadastrar_jogo(jogo: JogoNovo, admin_data=Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        query = "INSERT INTO jogos (titulo, plataforma, preco_aluguel, preco_aluguel_14, descricao, url_imagem, tempo_jogo, nota, data_lancamento) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;"
+        query = """
+            INSERT INTO jogos (
+                titulo, plataforma, preco_aluguel, preco_aluguel_14, 
+                descricao, url_imagem, tempo_jogo, nota, data_lancamento, 
+                recomendacao_cliente
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+        """
         cursor.execute(
             query,
             (
@@ -73,6 +101,7 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data=Depends(verificar_admin)):
                 jogo.tempo_jogo,
                 jogo.nota,
                 jogo.data_lancamento,
+                jogo.recomendacao_cliente,
             ),
         )
         conn.commit()
