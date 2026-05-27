@@ -19,6 +19,7 @@ class JogoNovo(BaseModel):
     tempo_jogo: str = ""
     nota: float = 0.0
     data_lancamento: str = None
+    recomendacao_cliente: bool = False
 
 
 class ContaPSNNova(BaseModel):
