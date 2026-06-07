@@ -434,3 +434,61 @@ def remover_cupom(cupom_id: int, admin_data=Depends(verificar_admin)):
     cursor.close()
     conn.close()
     return {"mensagem": "Cupom deletado."}
+
+
+@router.get("/recarga/sincronizar/{utilizador_id}")
+def sincronizar_pagamentos_pendentes(utilizador_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Busca apenas os pedidos que ficaram "presos" no limbo
+        cursor.execute(
+            "SELECT id, valor_pago, valor_bonus, cupom FROM pedidos_pix WHERE utilizador_id = %s AND status = 'PENDENTE'",
+            (utilizador_id,),
+        )
+        pendentes = cursor.fetchall()
+
+        if not pendentes:
+            return {"mensagem": "Nenhum pagamento pendente."}
+
+        efi = EfiPay(credentials_efi)
+
+        for ped in pendentes:
+            payment_id = ped["id"]
+
+            # Se for Stripe (Começa com cs_)
+            if payment_id.startswith("cs_"):
+                try:
+                    session = stripe.checkout.Session.retrieve(payment_id)
+                    if session.payment_status == "paid":
+                        processar_sucesso_pagamento(
+                            payment_id,
+                            utilizador_id,
+                            ped["valor_pago"],
+                            ped["valor_bonus"],
+                            ped["cupom"],
+                        )
+                except Exception as e:
+                    print(f"Erro ao sincronizar Stripe: {e}")
+                    pass
+
+            # Se for Efí Pix
+            else:
+                try:
+                    detalhes = efi.pix_detail_charge(params={"txid": payment_id})
+                    if detalhes.get("status") == "CONCLUIDA":
+                        processar_sucesso_pagamento(
+                            payment_id,
+                            utilizador_id,
+                            ped["valor_pago"],
+                            ped["valor_bonus"],
+                            ped["cupom"],
+                        )
+                except Exception as e:
+                    print(f"Erro ao sincronizar Efí: {e}")
+                    pass
+
+        return {"mensagem": "Sincronização concluída com sucesso."}
+    finally:
+        cursor.close()
+        conn.close()
