@@ -1,5 +1,4 @@
-from fastapi import FastAPI
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from psycopg2.extras import RealDictCursor
@@ -12,7 +11,9 @@ from efipay import EfiPay
 
 app = FastAPI(title="API Locadora PS5")
 
-# 1. Middlewares (CORS)
+# ==============================================================================
+# 1. MIDDLEWARES E SEGURANÇA
+# ==============================================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,7 +22,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. Injetando os Módulos de Rotas
+# ==============================================================================
+# 2. INJEÇÃO DOS MÓDULOS DE ROTAS (ROUTERS)
+# ==============================================================================
 app.include_router(usuarios.router)
 app.include_router(jogos.router)
 app.include_router(pagamentos.router)
@@ -31,23 +34,22 @@ app.include_router(admin.router)
 
 @app.get("/")
 def home():
+    """Rota de pulsação para confirmar que a API está acordada e rodando."""
     return {"mensagem": "API Online e Modularizada 🚀"}
 
 
 @app.get("/configuracoes")
 def get_config():
+    """
+    [R] Rota Pública.
+    Retorna os banners e textos que o Frontend usa para desenhar a vitrine.
+    """
     conn = get_db_connection()
-    # RealDictCursor garante que o Python transforme as colunas em JSON com os nomes corretos
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("SELECT * FROM configuracoes LIMIT 1")
         config = cursor.fetchone()
-
-        if config:
-            return config
-        else:
-            return {}  # Retorna vazio se a tabela não existir ainda
-
+        return config if config else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -58,79 +60,111 @@ def get_config():
 # ==============================================================================
 # MOTOR DE TAREFAS AUTOMÁTICAS (CRON JOBS)
 # ==============================================================================
+
+
 def verificar_alugueis_vencidos():
+    """
+    Cron Job (A cada 1 minuto):
+    Derruba automaticamente locações que passaram da data final e joga aquele
+    slot específico ('PRIMARIA' ou 'SECUNDARIA') para manutenção.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT id, conta_psn_id FROM locacoes WHERE status = 'ATIVA' AND data_fim <= CURRENT_TIMESTAMP"
+            "SELECT id, conta_psn_id, tipo_slot FROM locacoes WHERE status = 'ATIVA' AND data_fim <= CURRENT_TIMESTAMP"
         )
         locacoes_vencidas = cursor.fetchall()
         if locacoes_vencidas:
             for loc in locacoes_vencidas:
+                loc_id, conta_id, tipo_slot = loc
+                coluna_status = (
+                    "status_primaria"
+                    if tipo_slot == "PRIMARIA"
+                    else "status_secundaria"
+                )
+
                 cursor.execute(
-                    "UPDATE locacoes SET status = 'EXPIRADA' WHERE id = %s", (loc[0],)
+                    "UPDATE locacoes SET status = 'EXPIRADA' WHERE id = %s", (loc_id,)
                 )
                 cursor.execute(
-                    "UPDATE contas_psn SET status = 'MANUTENCAO' WHERE id = %s",
-                    (loc[1],),
+                    f"UPDATE contas_psn SET {coluna_status} = 'MANUTENCAO' WHERE id = %s",
+                    (conta_id,),
                 )
             conn.commit()
-    except Exception:
+    except Exception as e:
         conn.rollback()
+        print(f"Erro no Cron de Vencidos: {e}")
     finally:
         cursor.close()
         conn.close()
 
 
 def processar_filas_automaticamente():
+    """
+    Cron Job (A cada 1 minuto):
+    O 'Maestro' da fila de espera. Olha para as contas com vagas DISPONIVEIS e,
+    se houver alguém aguardando aquele tipo_slot específico, converte a reserva
+    em um aluguel ativo automaticamente e avisa o cliente.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # Busca jogos que tenham pelo menos UM slot disponível E tenham fila aguardando esse mesmo slot
         cursor.execute("""
-            SELECT DISTINCT f.jogo_id, j.titulo, j.data_lancamento
+            SELECT DISTINCT f.jogo_id, j.titulo, j.data_lancamento, f.tipo_slot
             FROM fila_espera f
             JOIN jogos j ON f.jogo_id = j.id
             JOIN contas_psn c ON c.jogo_id = j.id
-            WHERE f.status = 'AGUARDANDO' AND c.status = 'DISPONIVEL'
+            WHERE f.status = 'AGUARDANDO' AND (
+                (f.tipo_slot = 'PRIMARIA' AND c.status_primaria = 'DISPONIVEL') OR 
+                (f.tipo_slot = 'SECUNDARIA' AND c.status_secundaria = 'DISPONIVEL')
+            )
         """)
         jogos_pendentes = cursor.fetchall()
         hoje_str = datetime.now().strftime("%Y-%m-%d")
 
         for jp in jogos_pendentes:
-            jogo_id, titulo, data_lanc_str = (
-                jp["jogo_id"],
-                jp["titulo"],
-                str(jp["data_lancamento"]) if jp["data_lancamento"] else None,
+            jogo_id, titulo, tipo_slot = jp["jogo_id"], jp["titulo"], jp["tipo_slot"]
+            data_lanc_str = (
+                str(jp["data_lancamento"]) if jp["data_lancamento"] else None
             )
+
+            # Bloqueio de Lançamento (Não fura a pré-venda)
             if data_lanc_str and data_lanc_str > hoje_str:
                 continue
 
+            coluna_status = (
+                "status_primaria" if tipo_slot == "PRIMARIA" else "status_secundaria"
+            )
             cursor.execute(
-                "SELECT id FROM contas_psn WHERE jogo_id = %s AND status = 'DISPONIVEL'",
+                f"SELECT id FROM contas_psn WHERE jogo_id = %s AND {coluna_status} = 'DISPONIVEL'",
                 (jogo_id,),
             )
             contas_disponiveis = cursor.fetchall()
 
             for conta in contas_disponiveis:
                 eh_pre_venda = data_lanc_str and str(data_lanc_str) >= hoje_str
-                query_proximo = "SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' ORDER BY "
+
+                # Puxa o próximo da fila respeitando o tipo de slot e as regras VIP
+                query_proximo = "SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s ORDER BY "
                 ordem = (
                     "(SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC, data_solicitacao ASC LIMIT 1"
                     if eh_pre_venda
                     else "data_solicitacao ASC LIMIT 1"
                 )
 
-                cursor.execute(query_proximo + ordem, (jogo_id,))
+                cursor.execute(query_proximo + ordem, (jogo_id, tipo_slot))
                 proximo = cursor.fetchone()
 
                 if proximo:
                     cursor.execute(
-                        "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA')",
+                        "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s)",
                         (
                             proximo["utilizador_id"],
                             conta["id"],
                             proximo.get("dias_aluguel", 7),
+                            tipo_slot,
                         ),
                     )
                     cursor.execute(
@@ -138,10 +172,11 @@ def processar_filas_automaticamente():
                         (proximo["id"],),
                     )
                     cursor.execute(
-                        "UPDATE contas_psn SET status = 'ALUGADA' WHERE id = %s",
+                        f"UPDATE contas_psn SET {coluna_status} = 'ALUGADA' WHERE id = %s",
                         (conta["id"],),
                     )
-                    msg = f"🎉 SEU ACESSO FOI LIBERADO! O jogo {titulo} já está na aba 'Meus Acessos'. Bom jogo!"
+
+                    msg = f"🎉 SEU ACESSO FOI LIBERADO! A sua vaga ({tipo_slot}) do jogo {titulo} já está na aba 'Meus Acessos'. Bom jogo!"
                     cursor.execute(
                         "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
                         (proximo["utilizador_id"], proximo["id"], titulo, msg),
@@ -151,18 +186,21 @@ def processar_filas_automaticamente():
                     break
     except Exception as e:
         conn.rollback()
-        print(f"Erro Fila: {e}")
+        print(f"Erro Fila Cron: {e}")
     finally:
         cursor.close()
         conn.close()
 
 
 def verificar_pix_perdidos():
-    """Robô que roda a cada 1 minuto caçando Pix que o cliente pagou e fechou o site"""
+    """
+    Cron Job (A cada 1 minuto):
+    Rastreador de Pix. Vai na Efí bater na porta e resgatar transações pendentes
+    que não dispararam Webhooks.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Busca todos os pedidos que ainda estão pendentes
         cursor.execute(
             "SELECT id, utilizador_id, valor_pago, valor_bonus, cupom FROM pedidos_pix WHERE status = 'PENDENTE'"
         )
@@ -172,13 +210,11 @@ def verificar_pix_perdidos():
             efi = EfiPay(credentials_efi)
             for pedido in pendentes:
                 txid = pedido["id"]
-
-                # Se não for Stripe (Stripe começa com cs_), é Pix da Efí
                 if not txid.startswith("cs_"):
                     try:
                         detalhes = efi.pix_detail_charge(params={"txid": txid})
                         if detalhes.get("status") == "CONCLUIDA":
-                            print(f"💰 PIX PERDIDO RECUPERADO! TXID: {txid}")
+                            print(f"💰 PIX PERDIDO RECUPERADO VIA CRON! TXID: {txid}")
                             processar_sucesso_pagamento(
                                 txid,
                                 pedido["utilizador_id"],
@@ -189,7 +225,7 @@ def verificar_pix_perdidos():
                     except Exception:
                         pass
     except Exception as e:
-        print(f"Erro no rastreador de Pix: {e}")
+        print(f"Erro no rastreador de Pix Cron: {e}")
     finally:
         cursor.close()
         conn.close()
@@ -197,12 +233,17 @@ def verificar_pix_perdidos():
 
 @app.post("/admin/forcar-processamento-filas", tags=["Admin"])
 def forcar_filas():
+    """Botão manual para destravar a fila caso o Cron Job do Render hiberne."""
     processar_filas_automaticamente()
     return {"mensagem": "O motor de filas rodou com sucesso!"}
 
 
+# ==============================================================================
+# INICIALIZAÇÃO DA API E DA CRON
+# ==============================================================================
 @app.on_event("startup")
 def iniciar_servicos():
+    """Roda automaticamente quando o Render liga a API pela primeira vez."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -210,18 +251,12 @@ def iniciar_servicos():
             "CREATE TABLE IF NOT EXISTS notificacoes (id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255), mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
         conn.commit()
-        try:
-            cursor.execute(
-                "ALTER TABLE fila_espera ADD COLUMN dias_aluguel INT DEFAULT 7"
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"⚠️ AVISO DE STARTUP: Banco de dados ainda acordando. Detalhe: {e}")
+        print(f"⚠️ AVISO DE STARTUP: Banco de dados falhou na checagem. Detalhe: {e}")
 
+    # Inicia as varreduras de fundo
     scheduler = BackgroundScheduler()
     scheduler.add_job(verificar_alugueis_vencidos, "interval", minutes=1)
     scheduler.add_job(processar_filas_automaticamente, "interval", minutes=1)
