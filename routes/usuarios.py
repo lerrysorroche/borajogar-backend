@@ -21,21 +21,43 @@ from models import (
 
 router = APIRouter(tags=["Usuarios"])
 
+# ==============================================================================
+# FUNÇÕES AUXILIARES
+# ==============================================================================
+
 
 def gerar_codigo_convite(nome):
+    """
+    Gera um código promocional único baseado no primeiro nome do usuário.
+    Exemplo: "João" -> "JOAO" + 4 números aleatórios (JOAO4829).
+    Se o nome for curto, preenche com 'X'.
+    """
     letras = "".join(filter(str.isalpha, nome.split()[0].upper()))[:4].ljust(4, "X")
     nums = "".join(random.choices(string.digits, k=4))
     return f"{letras}{nums}"
 
 
+# ==============================================================================
+# AUTENTICAÇÃO E REGISTRO
+# ==============================================================================
+
+
 @router.post("/usuarios", status_code=201)
 def cadastrar_usuario(usuario: UsuarioNovo):
+    """
+    [C] Criação de Conta (Sign Up Clássico).
+    Criptografa a senha antes de salvar no banco e gera o código de indicação.
+    Se o cliente usou o código de um amigo, cria o vínculo ('indicado_por') para
+    pagamento futuro do bônus de cashback na primeira recarga.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         senha_segura = gerar_hash_senha(usuario.senha)
         meu_codigo = gerar_codigo_convite(usuario.nome)
         indicado_por_id = None
+
+        # Verifica se o código de indicação é válido e pega o ID do amigo
         if usuario.codigo_indicacao:
             cursor.execute(
                 "SELECT id FROM utilizadores WHERE codigo_indicacao = %s",
@@ -66,7 +88,8 @@ def cadastrar_usuario(usuario: UsuarioNovo):
     except Exception as e:
         conn.rollback()
         raise HTTPException(
-            status_code=400, detail="Erro ao cadastrar. E-mail já existe."
+            status_code=400,
+            detail="Erro ao cadastrar. Verifique se o e-mail já existe.",
         )
     finally:
         cursor.close()
@@ -75,6 +98,11 @@ def cadastrar_usuario(usuario: UsuarioNovo):
 
 @router.post("/login")
 def fazer_login(login: LoginRequest):
+    """
+    [R] Login Clássico (E-mail e Senha).
+    Valida a senha descriptografando o hash do banco. Em caso de sucesso,
+    gera um Token JWT para manter o cliente logado no Frontend de forma segura.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -84,8 +112,10 @@ def fazer_login(login: LoginRequest):
     usuario = cursor.fetchone()
     cursor.close()
     conn.close()
+
     if not usuario or not verificar_senha(login.senha, usuario["senha_hash"]):
         raise HTTPException(status_code=401, detail="E-mail ou senha incorretos.")
+
     token = criar_token_acesso(
         {
             "id": usuario["id"],
@@ -93,13 +123,20 @@ def fazer_login(login: LoginRequest):
             "is_admin": usuario["is_admin"],
         }
     )
-    del usuario["senha_hash"]
+
+    del usuario["senha_hash"]  # Remove a hash da resposta por segurança
     usuario["saldo"] = float(usuario["saldo"])
     return {"mensagem": "Login aprovado", "usuario": usuario, "token": token}
 
 
 @router.post("/login/google")
 def login_google(req: GoogleLoginRequest):
+    """
+    [C/R] Login via Google (OAuth Firebase).
+    Verifica se o e-mail já existe: se sim, faz o login normalmente.
+    Se não, cria a conta blindada automaticamente, exigindo apenas que o
+    frontend envie o telefone do cliente para o banco de dados.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -126,24 +163,21 @@ def login_google(req: GoogleLoginRequest):
                 "novo_usuario": False,
             }
         else:
+            # Pede o telefone caso a conta Google não tenha fornecido
             if not req.telefone:
                 return {"mensagem": "precisa_telefone", "novo_usuario": True}
 
-            # 2. Criação da conta nova blindada
-            import random
-            import string
-
-            # Cria um código aleatório exclusivo para o cliente
-            meu_codigo = "".join(
-                random.choices(string.ascii_uppercase + string.digits, k=6)
-            )
-            senha_segura = gerar_hash_senha("GoogleAuth123!")
+            # 2. Criação da conta nova blindada com senha aleatória
+            meu_codigo = gerar_codigo_convite(req.nome)
+            senha_segura = gerar_hash_senha(
+                "GoogleAuth123!"
+            )  # Senha padrão inacessível
 
             cursor.execute(
                 "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
                 (req.nome, req.email, senha_segura, req.telefone, meu_codigo),
             )
-            novo_id = cursor.fetchone()["id"]  # <-- AQUI ESTAVA O BUG DO [0]!
+            novo_id = cursor.fetchone()["id"]
             conn.commit()
 
             cursor.execute(
@@ -178,10 +212,17 @@ def login_google(req: GoogleLoginRequest):
 
 @router.post("/esqueci-senha")
 def esqueci_senha(req: EsqueciSenhaRequest):
+    """
+    [U] Recuperação de Conta.
+    Gera uma senha aleatória de 8 caracteres, salva no banco com hash,
+    e dispara um e-mail para o cliente usando a API transacional do Brevo.
+    A resposta é genérica por segurança (não confirma se o e-mail existe ou não).
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("SELECT id, nome FROM utilizadores WHERE email = %s", (req.email,))
     usuario = cursor.fetchone()
+
     if not usuario:
         cursor.close()
         conn.close()
@@ -199,6 +240,7 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     )
     conn.commit()
 
+    # Disparo de e-mail via Brevo REST API
     try:
         remetente = os.getenv("EMAIL_REMETENTE")
         chave_api = os.getenv("BREVO_API_KEY")
@@ -213,7 +255,7 @@ def esqueci_senha(req: EsqueciSenhaRequest):
                 "sender": {"name": "Equipe Bora Jogar", "email": remetente},
                 "to": [{"email": req.email}],
                 "subject": "Bora Jogar - Recuperação de Senha",
-                "htmlContent": f"Sua nova senha é: {nova_senha}",
+                "htmlContent": f"Sua nova senha temporária é: <strong>{nova_senha}</strong><br>Por favor, altere-a no painel Meus Acessos.",
             }
             req_http = urllib.request.Request(
                 url,
@@ -228,6 +270,7 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     finally:
         cursor.close()
         conn.close()
+
     return {
         "mensagem": "Se este e-mail estiver cadastrado, uma nova senha foi enviada."
     }
@@ -235,12 +278,17 @@ def esqueci_senha(req: EsqueciSenhaRequest):
 
 @router.post("/mudar-senha")
 def mudar_senha(req: MudarSenhaRequest):
+    """
+    [U] Altera a senha do cliente por dentro do Dashboard (Meus Acessos).
+    Exige a digitação da senha atual para garantir que é o próprio usuário alterando.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
         "SELECT senha_hash FROM utilizadores WHERE id = %s", (req.utilizador_id,)
     )
     usuario = cursor.fetchone()
+
     if not usuario or not verificar_senha(req.senha_atual, usuario["senha_hash"]):
         cursor.close()
         conn.close()
@@ -257,8 +305,17 @@ def mudar_senha(req: MudarSenhaRequest):
     return {"mensagem": "Senha alterada com sucesso!"}
 
 
+# ==============================================================================
+# ÁREA DO CLIENTE (PERFIL, EXTRATO E NOTIFICAÇÕES)
+# ==============================================================================
+
+
 @router.get("/usuarios/{usuario_id}/saldo")
 def buscar_saldo_real(usuario_id: int):
+    """
+    [R] Retorna a fonte da verdade do saldo do cliente direto do banco de dados.
+    Usado intensamente pelo React após recargas e aluguéis para atualizar o visual.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -272,6 +329,10 @@ def buscar_saldo_real(usuario_id: int):
 
 @router.get("/extrato/{usuario_id}")
 def buscar_extrato_usuario(usuario_id: int):
+    """
+    [R] Alimenta a tabela de extrato da carteira do cliente.
+    Mostra ENTRADAS e SAIDAS de recargas, aluguéis, multas e cashbacks gamificados.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -286,6 +347,11 @@ def buscar_extrato_usuario(usuario_id: int):
 
 @router.get("/notificacoes/{usuario_id}")
 def buscar_notificacoes(usuario_id: int):
+    """
+    [R] Busca os alertas não lidos do usuário.
+    Principalmente os alertas de "Mudança de Data" gerados quando o sistema VIP
+    empurra a data de um cliente de Rank menor para baixo na fila de espera.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -298,11 +364,12 @@ def buscar_notificacoes(usuario_id: int):
     return res
 
 
-from models import LerNotificacao
-
-
 @router.post("/notificacoes/ler")
 def ler_notificacao(dados: LerNotificacao):
+    """
+    [U] Confirma que o cliente leu o alerta (botão "Entendi" do React)
+    e oculta o modal laranja de aviso de mudança na fila.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -314,8 +381,17 @@ def ler_notificacao(dados: LerNotificacao):
     return {"status": "ok"}
 
 
+# ==============================================================================
+# GESTÃO DE CLIENTES (ADMIN)
+# ==============================================================================
+
+
 @router.get("/usuarios")
 def listar_usuarios(admin_data=Depends(verificar_admin)):
+    """
+    [R] Painel Admin: Tabela Base de Clientes.
+    Lista todos os clientes da locadora para gestão manual e filtros.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -331,6 +407,12 @@ def listar_usuarios(admin_data=Depends(verificar_admin)):
 def editar_usuario(
     usuario_id: int, dados: EditarClienteRequest, admin_data=Depends(verificar_admin)
 ):
+    """
+    [U] Painel Admin: Edição completa do Perfil do Cliente.
+    Inteligência Financeira: Se você alterar o saldo do cliente por aqui, a rota
+    calcula automaticamente a diferença matemática e gera um lançamento no
+    extrato (ENTRADA ou SAÍDA) com a justificativa que você digitou.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -338,8 +420,11 @@ def editar_usuario(
         usuario_db = cursor.fetchone()
         if not usuario_db:
             raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
         saldo_atual = float(usuario_db["saldo"])
         novo_saldo = float(dados.saldo)
+
+        # Inteligência financeira: injeta a transação se houve mudança no saldo
         if saldo_atual != novo_saldo:
             diferenca = novo_saldo - saldo_atual
             tipo_transacao = "ENTRADA" if diferenca > 0 else "SAIDA"
@@ -352,6 +437,7 @@ def editar_usuario(
                 "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, %s, %s, %s)",
                 (usuario_id, tipo_transacao, abs(diferenca), motivo),
             )
+
         cursor.execute(
             "UPDATE utilizadores SET nome = %s, email = %s, telefone = %s, saldo = %s WHERE id = %s",
             (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id),
@@ -368,6 +454,11 @@ def editar_usuario(
 
 @router.delete("/usuarios/{usuario_id}")
 def deletar_usuario(usuario_id: int, admin_data=Depends(verificar_admin)):
+    """
+    [D] Painel Admin: Exclui um cliente da base.
+    Restrição de Integridade: Será bloqueado pelo banco de dados se o cliente
+    tiver transações ou locações amarradas a ele.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -377,7 +468,8 @@ def deletar_usuario(usuario_id: int, admin_data=Depends(verificar_admin)):
     except Exception:
         conn.rollback()
         raise HTTPException(
-            status_code=400, detail="Erro: Este usuário possui histórico."
+            status_code=400,
+            detail="Erro: Este usuário possui histórico financeiro ou locações e não pode ser apagado.",
         )
     finally:
         cursor.close()
