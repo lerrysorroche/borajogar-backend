@@ -151,8 +151,8 @@ def gerar_checkout_stripe(recarga: NovaRecarga):
     Valida as regras de cupons e amarra as variáveis no `metadata` do Stripe
     para que o Webhook consiga processar o saldo posteriormente.
     """
-    if recarga.valor < 30.0:
-        raise HTTPException(status_code=400, detail="Mínimo R$ 30,00.")
+    if recarga.valor < 15.0:
+        raise HTTPException(status_code=400, detail="Mínimo R$ 15,00.")
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -236,8 +236,8 @@ def gerar_pix_efi(recarga: NovaRecarga):
     [C] Gera o QR Code Pix e Linha Digitável usando a Efí Pay.
     Armazena o ID da transação (txid) no banco aguardando o pagamento do cliente.
     """
-    if recarga.valor < 30.0:
-        raise HTTPException(status_code=400, detail="Mínimo R$ 30,00.")
+    if recarga.valor < 15.0:
+        raise HTTPException(status_code=400, detail="Mínimo R$ 15,00.")
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
