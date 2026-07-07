@@ -33,7 +33,13 @@ def listar_jogos():
                 (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS fila_dias_espera,
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
-                (SELECT COALESCE(SUM(l.preco_pago), 0) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.utilizador_id != 1) AS faturamento_total,
+                (SELECT COALESCE(SUM(
+                    CASE 
+                        WHEN t.tipo = 'SAIDA' THEN t.valor 
+                        WHEN t.tipo = 'ENTRADA' THEN -t.valor 
+                        ELSE 0 
+                    END
+                ), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%' || j.titulo || '%') AS faturamento_total,
                 CASE 
                     WHEN j.data_lancamento > CURRENT_DATE THEN 1 
                     WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' THEN 2 
@@ -62,7 +68,8 @@ def listar_jogos():
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
                 0 AS fila_dias_espera,
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
-                (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade
+                (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
+                (SELECT COALESCE(SUM(CASE WHEN t.tipo = 'SAIDA' THEN t.valor WHEN t.tipo = 'ENTRADA' THEN -t.valor ELSE 0 END), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%' || j.titulo || '%') AS faturamento_total
             FROM jogos j ORDER BY j.id DESC;
         """
         cursor.execute(query_segura)
