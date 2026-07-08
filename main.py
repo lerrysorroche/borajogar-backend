@@ -110,33 +110,41 @@ def processar_filas_automaticamente():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Busca jogos que tenham pelo menos UM slot disponível E tenham fila aguardando esse mesmo slot
+        # [BLINDAGEM MAXIMA] A query converte o relógio do servidor para o fuso do Brasil.
+        # Jogos do futuro são ignorados. O Python também recebe a variável 'is_dia_lancamento'
+        # para saber se aplica a regra de distribuição VIP.
         cursor.execute("""
-            SELECT DISTINCT f.jogo_id, j.titulo, j.data_lancamento, f.tipo_slot
+            SELECT DISTINCT 
+                f.jogo_id, 
+                j.titulo, 
+                f.tipo_slot,
+                CASE WHEN CAST(j.data_lancamento AS VARCHAR) = TO_CHAR(CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') THEN True ELSE False END as is_dia_lancamento
             FROM fila_espera f
             JOIN jogos j ON f.jogo_id = j.id
             JOIN contas_psn c ON c.jogo_id = j.id
-            WHERE f.status = 'AGUARDANDO' AND (
+            WHERE f.status = 'AGUARDANDO' 
+            AND (
+                j.data_lancamento IS NULL 
+                OR j.data_lancamento = '' 
+                OR CAST(j.data_lancamento AS VARCHAR) <= TO_CHAR(CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')
+            )
+            AND (
                 (f.tipo_slot = 'PRIMARIA' AND c.status_primaria = 'DISPONIVEL') OR 
                 (f.tipo_slot = 'SECUNDARIA' AND c.status_secundaria = 'DISPONIVEL')
             )
         """)
         jogos_pendentes = cursor.fetchall()
-        hoje_str = datetime.now().strftime("%Y-%m-%d")
 
         for jp in jogos_pendentes:
-            jogo_id, titulo, tipo_slot = jp["jogo_id"], jp["titulo"], jp["tipo_slot"]
-            data_lanc_str = (
-                str(jp["data_lancamento"]) if jp["data_lancamento"] else None
-            )
-
-            # Bloqueio de Lançamento (Não fura a pré-venda)
-            if data_lanc_str and data_lanc_str > hoje_str:
-                continue
+            jogo_id = jp["jogo_id"]
+            titulo = jp["titulo"]
+            tipo_slot = jp["tipo_slot"]
+            is_dia_lancamento = jp["is_dia_lancamento"]
 
             coluna_status = (
                 "status_primaria" if tipo_slot == "PRIMARIA" else "status_secundaria"
             )
+
             cursor.execute(
                 f"SELECT id FROM contas_psn WHERE jogo_id = %s AND {coluna_status} = 'DISPONIVEL'",
                 (jogo_id,),
@@ -144,17 +152,17 @@ def processar_filas_automaticamente():
             contas_disponiveis = cursor.fetchall()
 
             for conta in contas_disponiveis:
-                eh_pre_venda = data_lanc_str and str(data_lanc_str) >= hoje_str
-
-                # Puxa o próximo da fila respeitando o tipo de slot e as regras VIP
-                query_proximo = "SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s ORDER BY "
+                # Se for O DIA do lançamento exato, usa a lógica VIP (quem tem mais aluguéis expira passa na frente).
+                # Se for um dia comum, atende estritamente por ordem de chegada na fila (FIFO).
                 ordem = (
                     "(SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC, data_solicitacao ASC LIMIT 1"
-                    if eh_pre_venda
+                    if is_dia_lancamento
                     else "data_solicitacao ASC LIMIT 1"
                 )
 
-                cursor.execute(query_proximo + ordem, (jogo_id, tipo_slot))
+                query_proximo = f"SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s ORDER BY {ordem}"
+
+                cursor.execute(query_proximo, (jogo_id, tipo_slot))
                 proximo = cursor.fetchone()
 
                 if proximo:
