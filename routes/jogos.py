@@ -3,8 +3,29 @@ from psycopg2.extras import RealDictCursor
 from database import get_db_connection
 from auth import verificar_admin
 from models import JogoNovo, EditarJogoRequest, VotoEnquete, NovaOpcaoEnquete
+import io
+import os
+import urllib.request
+import httpx
+from PIL import Image, ImageDraw, ImageFont
+from fastapi import Response, Query
 
 router = APIRouter(tags=["Jogos"])
+
+
+def get_font(size):
+    font_path = "Roboto-Black.ttf"
+    if not os.path.exists(font_path):
+        url = (
+            "https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Black.ttf"
+        )
+        urllib.request.urlretrieve(url, font_path)
+
+    try:
+        return ImageFont.truetype(font_path, size)
+    except IOError:
+        return ImageFont.load_default()
+
 
 # ==============================================================================
 # VITRINE E LISTAGEM DE JOGOS
@@ -341,3 +362,112 @@ def limpar_enquete_completa(admin_data=Depends(verificar_admin)):
     cursor.close()
     conn.close()
     return {"mensagem": "Enquete reiniciada com sucesso."}
+
+
+@router.get("/flyer")
+async def gerar_flyer(
+    titulo: str = Query("Lançamento Disponível"),
+    bg: str = Query("https://via.placeholder.com/1080x1080"),
+):
+    try:
+        # 1. Baixar a imagem original
+        async with httpx.AsyncClient() as client:
+            resposta = await client.get(bg)
+            fundo = Image.open(io.BytesIO(resposta.content)).convert("RGBA")
+
+        # 2. Cortar a imagem para um Quadrado (1080x1080)
+        largura, altura = fundo.size
+        tamanho_menor = min(largura, altura)
+        esquerda = (largura - tamanho_menor) / 2
+        topo = (altura - tamanho_menor) / 2
+        direita = (largura + tamanho_menor) / 2
+        fundo = fundo.crop((esquerda, topo, direita, altura))
+        fundo = fundo.resize((1080, 1080))
+
+        # 3. Criar a máscara escura
+        mascara = Image.new("RGBA", (1080, 1080), (0, 0, 0, 0))
+        draw_mascara = ImageDraw.Draw(mascara)
+        for y in range(1080):
+            if y > 400:
+                opacidade = int(((y - 400) / 680) * 240)
+                draw_mascara.line([(0, y), (1080, y)], fill=(0, 0, 0, opacidade))
+
+        imagem_final = Image.alpha_composite(fundo, mascara)
+        draw = ImageDraw.Draw(imagem_final)
+
+        # 4. Fontes
+        fonte_titulo = get_font(84)
+        fonte_tag = get_font(36)
+        fonte_btn = get_font(44)
+
+        # 5. Desenhando os elementos
+        texto_btn = "ALUGUE SEM FILAS ⚡"
+        bbox_btn = draw.textbbox((0, 0), texto_btn, font=fonte_btn)
+        largura_texto_btn = bbox_btn[2] - bbox_btn[0]
+
+        btn_padding_x, btn_padding_y = 48, 24
+        btn_w = largura_texto_btn + (btn_padding_x * 2)
+        btn_h = (bbox_btn[3] - bbox_btn[1]) + (btn_padding_y * 2)
+        btn_x = (1080 - btn_w) / 2
+        btn_y = 1080 - btn_h - 80
+
+        draw.rounded_rectangle(
+            [btn_x - 6, btn_y - 6, btn_x + btn_w + 6, btn_y + btn_h + 6],
+            radius=50,
+            fill="#6366f1",
+        )
+        draw.rounded_rectangle(
+            [btn_x, btn_y, btn_x + btn_w, btn_y + btn_h], radius=50, fill="#ffffff"
+        )
+        draw.text(
+            (btn_x + btn_padding_x, btn_y + btn_padding_y),
+            texto_btn,
+            font=fonte_btn,
+            fill="#000000",
+        )
+
+        titulo_upper = titulo.upper()
+        bbox_titulo = draw.textbbox((0, 0), titulo_upper, font=fonte_titulo)
+        largura_titulo = bbox_titulo[2] - bbox_titulo[0]
+
+        titulo_x = (1080 - largura_titulo) / 2
+        titulo_y = btn_y - (bbox_titulo[3] - bbox_titulo[1]) - 50
+
+        draw.text(
+            (titulo_x + 4, titulo_y + 4),
+            titulo_upper,
+            font=fonte_titulo,
+            fill=(0, 0, 0, 200),
+        )
+        draw.text((titulo_x, titulo_y), titulo_upper, font=fonte_titulo, fill="#ffffff")
+
+        texto_tag = "🎮 BORA JOGAR!"
+        bbox_tag = draw.textbbox((0, 0), texto_tag, font=fonte_tag)
+        largura_texto_tag = bbox_tag[2] - bbox_tag[0]
+
+        tag_padding_x, tag_padding_y = 32, 12
+        tag_w = largura_texto_tag + (tag_padding_x * 2)
+        tag_h = (bbox_tag[3] - bbox_tag[1]) + (tag_padding_y * 2)
+        tag_x = (1080 - tag_w) / 2
+        tag_y = titulo_y - tag_h - 24
+
+        draw.rounded_rectangle(
+            [tag_x, tag_y, tag_x + tag_w, tag_y + tag_h], radius=16, fill="#6366f1"
+        )
+        draw.text(
+            (tag_x + tag_padding_x, tag_y + tag_padding_y),
+            texto_tag,
+            font=fonte_tag,
+            fill="#ffffff",
+        )
+
+        # 6. Salvar e Retornar
+        buffer = io.BytesIO()
+        imagem_final.convert("RGB").save(buffer, format="PNG", quality=100)
+        buffer.seek(0)
+
+        return Response(content=buffer.getvalue(), media_type="image/png")
+
+    except Exception as e:
+        print(f"Erro ao gerar flyer: {e}")
+        return Response(content="Erro ao gerar flyer", status_code=500)
