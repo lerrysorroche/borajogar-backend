@@ -384,82 +384,103 @@ async def gerar_flyer(
         fundo = fundo.crop((esquerda, topo, direita, altura))
         fundo = fundo.resize((1080, 1080))
 
-        # 3. Criar a máscara escura
+        # 3. Máscara Cyberpunk (Gradiente de cima pra baixo, bem escuro no fundo)
         mascara = Image.new("RGBA", (1080, 1080), (0, 0, 0, 0))
         draw_mascara = ImageDraw.Draw(mascara)
         for y in range(1080):
-            if y > 400:
-                opacidade = int(((y - 400) / 680) * 240)
-                draw_mascara.line([(0, y), (1080, y)], fill=(0, 0, 0, opacidade))
+            if y > 100:
+                opacidade = int(((y - 100) / 980) * 240)
+                # Uma leve tonalidade de roxo/azul escuro no escurecimento
+                draw_mascara.line([(0, y), (1080, y)], fill=(8, 4, 16, opacidade))
 
         imagem_final = Image.alpha_composite(fundo, mascara)
         draw = ImageDraw.Draw(imagem_final)
 
-        # 4. Fontes
+        # 4. Preparar as fontes (usando a função auxiliar que já criamos)
         fonte_titulo = get_font(84)
         fonte_tag = get_font(36)
         fonte_btn = get_font(44)
 
-        # 5. Desenhando os elementos
-        texto_btn = "ALUGUE SEM FILAS ⚡"
-        bbox_btn = draw.textbbox((0, 0), texto_btn, font=fonte_btn)
-        largura_texto_btn = bbox_btn[2] - bbox_btn[0]
+        # Centro do Flyer
+        cx = 540
 
-        btn_padding_x, btn_padding_y = 48, 24
-        btn_w = largura_texto_btn + (btn_padding_x * 2)
-        btn_h = (bbox_btn[3] - bbox_btn[1]) + (btn_padding_y * 2)
-        btn_x = (1080 - btn_w) / 2
-        btn_y = 1080 - btn_h - 80
+        # --- BOTÃO "GARANTA A SUA VEZ" (Cyberpunk Cyan) ---
+        texto_btn = "GARANTA A SUA VEZ"
+        cy_btn = 980  # Altura fixada perto do rodapé
 
-        draw.rounded_rectangle(
-            [btn_x - 6, btn_y - 6, btn_x + btn_w + 6, btn_y + btn_h + 6],
-            radius=50,
-            fill="#6366f1",
-        )
-        draw.rounded_rectangle(
-            [btn_x, btn_y, btn_x + btn_w, btn_y + btn_h], radius=50, fill="#ffffff"
-        )
+        # 'anchor="mm"' centraliza perfeitamente o texto, matando o bug do alinhamento!
+        bbox_btn = draw.textbbox((cx, cy_btn), texto_btn, font=fonte_btn, anchor="mm")
+        pad_x, pad_y = 60, 26
+        btn_rect = [
+            bbox_btn[0] - pad_x,
+            bbox_btn[1] - pad_y,
+            bbox_btn[2] + pad_x,
+            bbox_btn[3] + pad_y,
+        ]
+
+        draw.rounded_rectangle(btn_rect, radius=8, fill="#00f3ff")  # Fundo Ciano Neon
         draw.text(
-            (btn_x + btn_padding_x, btn_y + btn_padding_y),
-            texto_btn,
-            font=fonte_btn,
-            fill="#000000",
-        )
+            (cx, cy_btn), texto_btn, font=fonte_btn, fill="#000000", anchor="mm"
+        )  # Texto Preto
 
+        # --- TÍTULO DO JOGO (Com Efeito Glitch) ---
         titulo_upper = titulo.upper()
-        bbox_titulo = draw.textbbox((0, 0), titulo_upper, font=fonte_titulo)
-        largura_titulo = bbox_titulo[2] - bbox_titulo[0]
 
-        titulo_x = (1080 - largura_titulo) / 2
-        titulo_y = btn_y - (bbox_titulo[3] - bbox_titulo[1]) - 50
+        # Descobrir a altura exata do título para posicionar logo acima do botão
+        bbox_title_temp = draw.textbbox(
+            (cx, 0), titulo_upper, font=fonte_titulo, anchor="mm"
+        )
+        title_h = bbox_title_temp[3] - bbox_title_temp[1]
 
+        cy_title = btn_rect[1] - (title_h / 2) - 50  # 50px de margem acima do botão
+
+        # Efeito Glitch/Aberração Cromática (Sombras deslocadas)
         draw.text(
-            (titulo_x + 4, titulo_y + 4),
+            (cx - 5, cy_title),
             titulo_upper,
             font=fonte_titulo,
-            fill=(0, 0, 0, 200),
-        )
-        draw.text((titulo_x, titulo_y), titulo_upper, font=fonte_titulo, fill="#ffffff")
-
-        texto_tag = "🎮 BORA JOGAR!"
-        bbox_tag = draw.textbbox((0, 0), texto_tag, font=fonte_tag)
-        largura_texto_tag = bbox_tag[2] - bbox_tag[0]
-
-        tag_padding_x, tag_padding_y = 32, 12
-        tag_w = largura_texto_tag + (tag_padding_x * 2)
-        tag_h = (bbox_tag[3] - bbox_tag[1]) + (tag_padding_y * 2)
-        tag_x = (1080 - tag_w) / 2
-        tag_y = titulo_y - tag_h - 24
-
-        draw.rounded_rectangle(
-            [tag_x, tag_y, tag_x + tag_w, tag_y + tag_h], radius=16, fill="#6366f1"
-        )
+            fill="#00f3ff",
+            anchor="mm",
+        )  # Sombra Ciano na esquerda
         draw.text(
-            (tag_x + tag_padding_x, tag_y + tag_padding_y),
-            texto_tag,
-            font=fonte_tag,
-            fill="#ffffff",
+            (cx + 5, cy_title),
+            titulo_upper,
+            font=fonte_titulo,
+            fill="#ff003c",
+            anchor="mm",
+        )  # Sombra Rosa na direita
+        draw.text(
+            (cx, cy_title), titulo_upper, font=fonte_titulo, fill="#ffffff", anchor="mm"
+        )  # Texto Principal Branco
+
+        # Pega a caixa real do título gerado
+        bbox_title = draw.textbbox(
+            (cx, cy_title), titulo_upper, font=fonte_titulo, anchor="mm"
         )
+
+        # --- TAG "BORA JOGAR" (Neon Pink) ---
+        texto_tag = "BORA JOGAR"
+
+        # Descobrir a altura exata da tag
+        bbox_tag_temp = draw.textbbox((cx, 0), texto_tag, font=fonte_tag, anchor="mm")
+        tag_h = bbox_tag_temp[3] - bbox_tag_temp[1]
+
+        cy_tag = bbox_title[1] - (tag_h / 2) - 60  # 60px acima do título
+
+        bbox_tag = draw.textbbox((cx, cy_tag), texto_tag, font=fonte_tag, anchor="mm")
+        pad_xt, pad_yt = 30, 14
+        tag_rect = [
+            bbox_tag[0] - pad_xt,
+            bbox_tag[1] - pad_yt,
+            bbox_tag[2] + pad_xt,
+            bbox_tag[3] + pad_yt,
+        ]
+
+        # Fundo escuro com borda Neon Rosa
+        draw.rounded_rectangle(
+            tag_rect, radius=6, outline="#ff003c", width=4, fill="#0a0a0a"
+        )
+        draw.text((cx, cy_tag), texto_tag, font=fonte_tag, fill="#ff003c", anchor="mm")
 
         # 6. Salvar e Retornar
         buffer = io.BytesIO()
