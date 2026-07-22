@@ -10,3 +10,5 @@ apscheduler
 requests
 stripe
 efipay
+Pillow>=9.5.0
+httpx>=0.24.0
