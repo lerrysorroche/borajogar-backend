@@ -7,7 +7,7 @@ import io
 import os
 import urllib.request
 import httpx
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 from fastapi import Response, Query
 
 router = APIRouter(tags=["Jogos"])
@@ -492,3 +492,115 @@ async def gerar_flyer(
     except Exception as e:
         print(f"Erro ao gerar flyer: {e}")
         return Response(content="Erro ao gerar flyer", status_code=500)
+
+
+@router.get("/flyer_nostalgia")
+async def gerar_flyer_nostalgia(
+    frase: str = Query("Bons tempos não voltam..."),
+    bg: str = Query("https://via.placeholder.com/1080x1080"),
+):
+    try:
+        # 1. Baixar a imagem original (vinda da RAWG)
+        async with httpx.AsyncClient() as client:
+            resposta = await client.get(bg)
+            fundo = Image.open(io.BytesIO(resposta.content)).convert("RGBA")
+
+        # 2. Cortar a imagem para Quadrado (1080x1080)
+        largura, altura = fundo.size
+        tamanho_menor = min(largura, altura)
+        esquerda = (largura - tamanho_menor) / 2
+        topo = (altura - tamanho_menor) / 2
+        direita = (largura + tamanho_menor) / 2
+        fundo = fundo.crop((esquerda, topo, direita, altura))
+        fundo = fundo.resize((1080, 1080))
+
+        # 3. Aplicar Filtro Nostálgico (Reduzir cor, escurecer bordas, tom quente)
+        # 3a. Reduzir a saturação (deixar mais "antigo")
+        enhancer = ImageEnhance.Color(fundo)
+        fundo = enhancer.enhance(0.4)
+
+        # 3b. Aumentar o contraste levemente
+        enhancer_contrast = ImageEnhance.Contrast(fundo)
+        fundo = enhancer_contrast.enhance(1.2)
+
+        # 4. Máscara Escura / Vinheta (Para destacar o texto)
+        mascara = Image.new("RGBA", (1080, 1080), (0, 0, 0, 0))
+        draw_mascara = ImageDraw.Draw(mascara)
+
+        # Cria um gradiente escuro em cima e embaixo
+        for y in range(1080):
+            # Escurece o topo
+            if y < 300:
+                opacidade_topo = int(((300 - y) / 300) * 220)
+                draw_mascara.line(
+                    [(0, y), (1080, y)], fill=(20, 10, 0, opacidade_topo)
+                )  # Tom sépia escuro
+            # Escurece a base
+            elif y > 780:
+                opacidade_base = int(((y - 780) / 300) * 220)
+                draw_mascara.line([(0, y), (1080, y)], fill=(20, 10, 0, opacidade_base))
+
+        imagem_final = Image.alpha_composite(fundo, mascara)
+        draw = ImageDraw.Draw(imagem_final)
+
+        # 5. Fontes
+        fonte_frase = get_font(56)  # Fonte um pouco menor para frases mais longas
+        fonte_tag = get_font(32)
+        cx = 540
+
+        # 6. Desenhando os elementos
+
+        # --- Tag Superior ---
+        texto_tag = "MÁQUINA DO TEMPO 📼"
+        bbox_tag = draw.textbbox((cx, 120), texto_tag, font=fonte_tag, anchor="mm")
+
+        # Fundo da Tag (Sépia Quente)
+        pad_x, pad_y = 24, 12
+        draw.rounded_rectangle(
+            [
+                bbox_tag[0] - pad_x,
+                bbox_tag[1] - pad_y,
+                bbox_tag[2] + pad_x,
+                bbox_tag[3] + pad_y,
+            ],
+            radius=8,
+            fill="#d97706",
+        )
+        draw.text((cx, 120), texto_tag, font=fonte_tag, fill="#ffffff", anchor="mm")
+
+        # --- Frase Nostálgica (Gemini) ---
+        # Como a frase pode ser longa, precisamos quebrar a linha (wrap)
+        import textwrap
+
+        linhas_frase = textwrap.wrap(
+            frase, width=28
+        )  # Quebra o texto a cada ~28 caracteres
+
+        altura_linha = 70
+        inicio_y = 850 - (
+            len(linhas_frase) * altura_linha
+        )  # Sobe dependendo do tamanho da frase
+
+        for i, linha in enumerate(linhas_frase):
+            pos_y = inicio_y + (i * altura_linha)
+            # Sombra da frase
+            draw.text(
+                (cx + 3, pos_y + 3),
+                linha,
+                font=fonte_frase,
+                fill="#000000",
+                anchor="mm",
+            )
+            # Texto principal (Amarelo envelhecido)
+            draw.text((cx, pos_y), linha, font=fonte_frase, fill="#fef3c7", anchor="mm")
+
+        # 7. Salvar e Retornar
+        buffer = io.BytesIO()
+        imagem_final.convert("RGB").save(buffer, format="PNG", quality=100)
+        buffer.seek(0)
+
+        return Response(content=buffer.getvalue(), media_type="image/png")
+
+    except Exception as e:
+        print(f"Erro ao gerar flyer nostalgia: {e}")
+        return Response(content="Erro ao gerar flyer nostalgia", status_code=500)
