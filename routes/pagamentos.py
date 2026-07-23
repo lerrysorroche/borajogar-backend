@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
+from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 import os
 import random
@@ -12,6 +13,15 @@ from auth import verificar_admin
 from models import NovaRecarga, NovoCupom
 
 router = APIRouter(tags=["Pagamentos"])
+
+
+# ==============================================================================
+# MODELOS (WEBHOOKS)
+# ==============================================================================
+class WebhookCupomN8n(BaseModel):
+    codigo: str
+    desconto_percent: float
+
 
 # ==============================================================================
 # CONFIGURAÇÕES DE GATEWAYS (STRIPE & EFÍ)
@@ -516,6 +526,35 @@ async def efi_webhook(request: Request):
         raise HTTPException(
             status_code=500, detail="Erro interno processando Webhook Efí"
         )
+
+
+@router.post("/api/webhooks/n8n/cupom-surpresa")
+def criar_cupom_n8n(dados: WebhookCupomN8n):
+    """
+    [C] Rota exclusiva para o n8n criar cupons dinâmicos do Instagram.
+    Como o sistema usa "Bônus de Recarga", basta salvar no banco como PERCENTUAL.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Usa 'PERCENTUAL' para que a função gerar_checkout_stripe calcule a porcentagem em cima da recarga
+        cursor.execute(
+            "INSERT INTO cupons (codigo, tipo, valor) VALUES (%s, 'PERCENTUAL', %s)",
+            (dados.codigo.upper(), dados.desconto_percent),
+        )
+        conn.commit()
+        return {
+            "status": "sucesso",
+            "mensagem": f"Cupom {dados.codigo.upper()} ativado na Bora Jogar!",
+        }
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=400, detail=f"Erro ao cadastrar cupom: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        conn.close()
 
 
 # ==============================================================================

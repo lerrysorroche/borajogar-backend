@@ -3,6 +3,7 @@ from psycopg2.extras import RealDictCursor
 from database import get_db_connection
 from auth import verificar_admin
 from models import JogoNovo, EditarJogoRequest, VotoEnquete, NovaOpcaoEnquete
+import textwrap
 import io
 import os
 import urllib.request
@@ -604,3 +605,84 @@ async def gerar_flyer_nostalgia(
     except Exception as e:
         print(f"Erro ao gerar flyer nostalgia: {e}")
         return Response(content="Erro ao gerar flyer nostalgia", status_code=500)
+
+
+@router.get("/flyer_beneficio")
+async def gerar_flyer_beneficio(
+    frase: str = Query("INDIQUE UM AMIGO E GANHE"),
+    cta: str = Query("SAIBA MAIS NO SITE"),
+):
+    try:
+        # Fundo temático com luzes Neon/Gamer abstratas (Unsplash)
+        bg_url = "https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=1080&h=1080&auto=format&fit=crop"
+
+        async with httpx.AsyncClient() as client:
+            resposta = await client.get(bg_url)
+            fundo = Image.open(io.BytesIO(resposta.content)).convert("RGBA")
+
+        # Máscara escura forte
+        mascara = Image.new(
+            "RGBA", (1080, 1080), (0, 0, 0, 200)
+        )  # Bem escuro para o texto ler bem
+        imagem_final = Image.alpha_composite(fundo, mascara)
+        draw = ImageDraw.Draw(imagem_final)
+
+        # Fontes
+        fonte_frase = get_font(68)
+        fonte_cta = get_font(40)
+        cx = 540
+
+        # --- A Frase do Benefício (Gerada pelo Gemini) ---
+        frase_upper = frase.upper()
+        linhas_frase = textwrap.wrap(frase_upper, width=18)
+
+        altura_linha = 90
+        inicio_y = 540 - ((len(linhas_frase) * altura_linha) / 2) - 40
+
+        for i, linha in enumerate(linhas_frase):
+            pos_y = inicio_y + (i * altura_linha)
+            # Texto principal em Magenta Neon
+            draw.text(
+                (cx, pos_y),
+                linha,
+                font=fonte_frase,
+                fill="#ff003c",
+                anchor="mm",
+                stroke_width=2,
+                stroke_fill="#ffffff",
+            )
+
+        # --- Botão Inferior Dinâmico ---
+        cy_cta = 950
+
+        # Fundo do botão (Azul/Ciano para contrastar)
+        bbox_cta = draw.textbbox((cx, cy_cta), cta.upper(), font=fonte_cta, anchor="mm")
+        pad_x, pad_y = 40, 20
+        draw.rounded_rectangle(
+            [
+                bbox_cta[0] - pad_x,
+                bbox_cta[1] - pad_y,
+                bbox_cta[2] + pad_x,
+                bbox_cta[3] + pad_y,
+            ],
+            radius=12,
+            fill="#00f3ff",
+        )
+        draw.text(
+            (cx, cy_cta), cta.upper(), font=fonte_cta, fill="#000000", anchor="mm"
+        )
+
+        # Logo / Tag superior
+        texto_tag = "⭐ VANTAGEM BORA JOGAR"
+        draw.text((cx, 120), texto_tag, font=get_font(28), fill="#e2e8f0", anchor="mm")
+
+        # Salvar e Retornar
+        buffer = io.BytesIO()
+        imagem_final.convert("RGB").save(buffer, format="PNG", quality=100)
+        buffer.seek(0)
+
+        return Response(content=buffer.getvalue(), media_type="image/png")
+
+    except Exception as e:
+        print(f"Erro ao gerar flyer beneficio: {e}")
+        return Response(content="Erro", status_code=500)
