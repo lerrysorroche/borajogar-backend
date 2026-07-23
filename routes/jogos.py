@@ -552,7 +552,7 @@ async def gerar_flyer_nostalgia(
         # 6. Desenhando os elementos
 
         # --- Tag Superior ---
-        texto_tag = "MÁQUINA DO TEMPO 📼"
+        texto_tag = "MÁQUINA DO TEMPO"
         bbox_tag = draw.textbbox((cx, 120), texto_tag, font=fonte_tag, anchor="mm")
 
         # Fundo da Tag (Sépia Quente)
@@ -673,7 +673,7 @@ async def gerar_flyer_beneficio(
         )
 
         # Logo / Tag superior
-        texto_tag = "⭐ VANTAGEM BORA JOGAR"
+        texto_tag = "VANTAGEM BORA JOGAR"
         draw.text((cx, 120), texto_tag, font=get_font(28), fill="#e2e8f0", anchor="mm")
 
         # Salvar e Retornar
