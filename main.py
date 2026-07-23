@@ -239,6 +239,33 @@ def verificar_pix_perdidos():
         conn.close()
 
 
+def limpar_cupons_surpresa_cron():
+    """
+    Cron Job (Diário às 23:59):
+    Apaga todos os cupons promocionais do Instagram que começam com 'SURPRESA',
+    garantindo que expirem à meia-noite e não fiquem acumulando no banco.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Usa '%%' porque o psycopg2 entende '%' como formatação de string
+        cursor.execute("DELETE FROM cupons WHERE codigo LIKE 'SURPRESA%%'")
+        apagados = cursor.rowcount
+        conn.commit()
+
+        if apagados > 0:
+            print(
+                f"🧹 FAXINA NOTURNA: {apagados} cupom(ns) 'SURPRESA' apagado(s) com sucesso."
+            )
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro no Cron de Limpeza de Cupons: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.post("/admin/forcar-processamento-filas", tags=["Admin"])
 def forcar_filas():
     """Botão manual para destravar a fila caso o Cron Job do Render hiberne."""
@@ -269,4 +296,8 @@ def iniciar_servicos():
     scheduler.add_job(verificar_alugueis_vencidos, "interval", minutes=1)
     scheduler.add_job(processar_filas_automaticamente, "interval", minutes=1)
     scheduler.add_job(verificar_pix_perdidos, "interval", minutes=1)
+
+    # NOVO: Faxina de cupons rodando todo dia às 23:59
+    scheduler.add_job(limpar_cupons_surpresa_cron, "cron", hour=23, minute=59)
+
     scheduler.start()
