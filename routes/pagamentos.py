@@ -606,3 +606,29 @@ def remover_cupom(cupom_id: int, admin_data=Depends(verificar_admin)):
     cursor.close()
     conn.close()
     return {"mensagem": "Cupom deletado."}
+
+
+@router.delete("/api/webhooks/n8n/limpar-cupons-surpresa")
+def limpar_cupons_surpresa():
+    """
+    [D] Rota de limpeza: Apaga todos os cupons que começam com 'SURPRESA',
+    garantindo que as campanhas de 24h do Instagram expirem à meia-noite.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # IMPORTANTE: No psycopg2 (banco de dados), usamos '%%' para representar o curinga '%'
+        cursor.execute("DELETE FROM cupons WHERE codigo LIKE 'SURPRESA%%'")
+        apagados = cursor.rowcount
+        conn.commit()
+
+        return {
+            "status": "sucesso",
+            "mensagem": f"Limpeza concluída. {apagados} cupom(ns) apagado(s).",
+        }
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro na limpeza: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
