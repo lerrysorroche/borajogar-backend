@@ -34,21 +34,35 @@ def get_font(size):
 
 
 @router.get("/jogos")
-def listar_jogos():
+def listar_jogos(usuario_id: int = 0):
     """
-    [R] O Motor da Vitrine Principal.
-    Retorna o catálogo completo de jogos, calculando em tempo real:
-    - O estoque isolado da Vaga Primária e Secundária.
-    - O tamanho e os dias acumulados na Fila de Espera.
-    - A ordenação inteligente: Prioriza lançamentos futuros (1), recentes (2) e populares (3).
+    [R] O Motor da Vitrine Principal (Agora com Preços VIP Dinâmicos).
+    Retorna o catálogo completo de jogos.
+    Se o usuario_id for passado (cliente logado), já devolve o preco_aluguel e
+    preco_secundaria com o desconto do Rank dele aplicado.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # Se um cliente estiver logado, puxa o Rank dele (teto de 20). Se não, rank é 0.
+        rank_cliente = 0
+        if usuario_id > 0:
+            cursor.execute("SELECT rank FROM utilizadores WHERE id = %s", (usuario_id,))
+            resultado_rank = cursor.fetchone()
+            if resultado_rank:
+                rank_cliente = min(resultado_rank["rank"], 20)
+
+        fator_desconto = 1.0 - (rank_cliente / 100.0)
+
         query = """
             SELECT j.id, j.titulo, j.plataforma, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
-                j.preco_aluguel, j.preco_aluguel_14, 
-                j.preco_secundaria, j.preco_secundaria_14,
+                
+                -- Aplica o desconto VIP em todos os preços diretamente na vitrine
+                ROUND((j.preco_aluguel * %s)::numeric, 2)::float AS preco_aluguel, 
+                ROUND((j.preco_aluguel_14 * %s)::numeric, 2)::float AS preco_aluguel_14, 
+                ROUND((j.preco_secundaria * %s)::numeric, 2)::float AS preco_secundaria, 
+                ROUND((j.preco_secundaria_14 * %s)::numeric, 2)::float AS preco_secundaria_14,
+                
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_primaria = 'DISPONIVEL') AS estoque_primaria,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_secundaria = 'DISPONIVEL') AS estoque_secundaria,
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
@@ -61,7 +75,7 @@ def listar_jogos():
                         WHEN t.tipo = 'ENTRADA' THEN -t.valor 
                         ELSE 0 
                     END
-                ), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%' || j.titulo || '%') AS faturamento_total,
+                ), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%%' || j.titulo || '%%') AS faturamento_total,
                 CASE 
                     WHEN j.data_lancamento > CURRENT_DATE THEN 1 
                     WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' THEN 2 
@@ -77,11 +91,20 @@ def listar_jogos():
                 END DESC NULLS LAST,
                 j.data_lancamento DESC NULLS LAST;
         """
-        cursor.execute(query)
+
+        # Passa o fator de desconto 4 vezes (para os 4 preços)
+        cursor.execute(
+            query, (fator_desconto, fator_desconto, fator_desconto, fator_desconto)
+        )
         resultados = cursor.fetchall()
+
+        # Envia o rank original na resposta para o Frontend saber se desenha a "Tag VIP"
+        for r in resultados:
+            r["rank_aplicado"] = rank_cliente
+
     except Exception as e:
         conn.rollback()
-        # Fallback de Segurança: Se a query complexa falhar, retorna os dados básicos para não derrubar o site.
+        # Fallback de Segurança
         query_segura = """
             SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, 
                 j.preco_secundaria, j.preco_secundaria_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
@@ -91,7 +114,8 @@ def listar_jogos():
                 0 AS fila_dias_espera,
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
-                (SELECT COALESCE(SUM(CASE WHEN t.tipo = 'SAIDA' THEN t.valor WHEN t.tipo = 'ENTRADA' THEN -t.valor ELSE 0 END), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%' || j.titulo || '%') AS faturamento_total
+                (SELECT COALESCE(SUM(CASE WHEN t.tipo = 'SAIDA' THEN t.valor WHEN t.tipo = 'ENTRADA' THEN -t.valor ELSE 0 END), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%%' || j.titulo || '%%') AS faturamento_total,
+                0 AS rank_aplicado
             FROM jogos j ORDER BY j.id DESC;
         """
         cursor.execute(query_segura)

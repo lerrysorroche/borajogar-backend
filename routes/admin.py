@@ -187,13 +187,13 @@ def liberar_conta_manutencao(
     dados: ResetSenhaRequest, admin_data=Depends(verificar_admin)
 ):
     """
-    [U] O gatilho mais complexo do Admin.
-    Você informa a nova senha que criou no site da PSN. O sistema:
+    [U] O gatilho mais complexo do Admin (Atualizado com Benefícios).
+    Você informa a nova senha que criou no site da PSN após constatar que a conta
+    foi desativada corretamente pelo cliente. O sistema:
     1. Salva a nova senha.
-    2. Paga a recompensa para o cliente antigo (se ele devolver de forma Premium).
-    3. Descobre se era a Vaga Primária ou Secundária que estava em manutenção.
-    4. Vai na fila de espera correspondente àquela vaga.
-    5. Se tiver gente esperando, manda a conta para o próximo. Se não, volta pro estoque.
+    2. Descobre se era a Vaga Primária ou Secundária.
+    3. Se o status_beneficio for 'PENDENTE', libera o Cashback e soma +1 no Rank do cliente honesto.
+    4. Vai na fila de espera correspondente e entrega para o próximo (ou devolve pra vitrine).
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -215,23 +215,33 @@ def liberar_conta_manutencao(
         coluna_status = f"status_{slot_em_manutencao.lower()}"
 
         cursor.execute(
-            "SELECT id, utilizador_id, cashback_pendente FROM locacoes WHERE conta_psn_id = %s AND tipo_slot = %s ORDER BY data_fim DESC LIMIT 1",
+            "SELECT id, utilizador_id, cashback_pendente, status_beneficio FROM locacoes WHERE conta_psn_id = %s AND tipo_slot = %s ORDER BY data_fim DESC LIMIT 1",
             (dados.conta_psn_id, slot_em_manutencao),
         )
         ultima_loc = cursor.fetchone()
 
-        # Injeta o dinheiro de devolução na carteira e gera o extrato
-        if ultima_loc and ultima_loc["cashback_pendente"] > 0:
-            cash, usr = ultima_loc["cashback_pendente"], ultima_loc["utilizador_id"]
+        # AUDITORIA APROVADA: Injeta o dinheiro, sobe o rank e marca como PAGO
+        if ultima_loc and ultima_loc["status_beneficio"] == "PENDENTE":
+            usr = ultima_loc["utilizador_id"]
+
+            # Sobe o Rank
+            cursor.execute("UPDATE usuarios SET rank = rank + 1 WHERE id = %s", (usr,))
+
+            # Injeta o dinheiro de devolução (se houver)
+            if ultima_loc["cashback_pendente"] > 0:
+                cash = ultima_loc["cashback_pendente"]
+                cursor.execute(
+                    "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s",
+                    (cash, usr),
+                )
+                cursor.execute(
+                    "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, '♻️ Recompensa: Devolução Premium')",
+                    (usr, cash),
+                )
+
+            # Trava o benefício como PAGO para evitar duplicidade
             cursor.execute(
-                "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s", (cash, usr)
-            )
-            cursor.execute(
-                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, '♻️ Recompensa: Devolução Premium')",
-                (usr, cash),
-            )
-            cursor.execute(
-                "UPDATE locacoes SET cashback_pendente = 0 WHERE id = %s",
+                "UPDATE locacoes SET status_beneficio = 'PAGO', cashback_pendente = 0 WHERE id = %s",
                 (ultima_loc["id"],),
             )
 
@@ -244,7 +254,7 @@ def liberar_conta_manutencao(
 
         query_fila = """SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s ORDER BY {} data_solicitacao ASC LIMIT 1"""
         ordem = (
-            "(SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC,"
+            "(SELECT rank FROM usuarios WHERE id = fila_espera.utilizador_id) DESC,"
             if eh_pre_venda
             else ""
         )
@@ -272,14 +282,14 @@ def liberar_conta_manutencao(
                 f"UPDATE contas_psn SET {coluna_status} = 'ALUGADA' WHERE id = %s",
                 (dados.conta_psn_id,),
             )
-            msg = f"Senha alterada! A vaga {slot_em_manutencao} foi entregue para o próximo da fila."
+            msg = f"Senha alterada e Conta Auditada! A vaga {slot_em_manutencao} foi entregue para o próximo da fila."
         else:
             # Não tem fila: Apenas devolve o slot para a prateleira
             cursor.execute(
                 f"UPDATE contas_psn SET {coluna_status} = 'DISPONIVEL' WHERE id = %s",
                 (dados.conta_psn_id,),
             )
-            msg = f"Senha alterada! A vaga {slot_em_manutencao} agora está DISPONÍVEL na vitrine."
+            msg = f"Senha alterada e Conta Auditada! A vaga {slot_em_manutencao} agora está DISPONÍVEL."
 
         conn.commit()
         return {"mensagem": msg}
@@ -321,27 +331,51 @@ def resetar_trava_2fa_admin(locacao_id: int, admin_data=Depends(verificar_admin)
 @router.post("/multar")
 def aplicar_multa(dados: AplicarMultaRequest, admin_data=Depends(verificar_admin)):
     """
-    [U] Rota Punitiva.
-    Se o cliente não desabilitar o Console Principal, você aplica R$ 50 de dívida no painel.
-    Retira qualquer direito a Cashback que ele pudesse ter ganhado nesta locação.
+    [U] Rota Punitiva / Cobrança no WhatsApp.
+    Se o cliente não desabilitar o Console, este botão:
+    1. Cancela qualquer benefício PENDENTE daquela devolução.
+    2. Aplica a multa (se houver valor).
+    3. Corta o Rank atual do cliente pela metade (Punição de confiança).
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # 1. Aplica a multa financeira (se você configurou um valor)
+        if dados.valor > 0:
+            cursor.execute(
+                "UPDATE utilizadores SET saldo = saldo - %s WHERE id = %s",
+                (dados.valor, dados.utilizador_id),
+            )
+            cursor.execute(
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, 'MULTA: Conta não desativada no Console')",
+                (dados.utilizador_id, dados.valor),
+            )
+
+        # 2. Cancela os Benefícios e o Cashback Pendente
         cursor.execute(
-            "UPDATE utilizadores SET saldo = saldo - %s WHERE id = %s",
-            (dados.valor, dados.utilizador_id),
-        )
-        cursor.execute(
-            "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, 'MULTA: Conta não desativada no Console')",
-            (dados.utilizador_id, dados.valor),
-        )
-        cursor.execute(
-            "UPDATE locacoes SET cashback_pendente = 0 WHERE utilizador_id = %s AND status = 'EXPIRADA'",
+            "UPDATE locacoes SET status_beneficio = 'CANCELADO', cashback_pendente = 0 WHERE utilizador_id = %s AND status = 'EXPIRADA' AND status_beneficio = 'PENDENTE'",
             (dados.utilizador_id,),
         )
+
+        # 3. Corta o Rank pela Metade
+        cursor.execute(
+            "SELECT rank FROM usuarios WHERE id = %s", (dados.utilizador_id,)
+        )
+        usuario = cursor.fetchone()
+
+        novo_rank = 0
+        if usuario:
+            rank_atual = usuario["rank"]
+            novo_rank = rank_atual // 2
+            cursor.execute(
+                "UPDATE usuarios SET rank = %s WHERE id = %s",
+                (novo_rank, dados.utilizador_id),
+            )
+
         conn.commit()
-        return {"mensagem": f"A multa de R$ {dados.valor:.2f} foi aplicada no cliente!"}
+        return {
+            "mensagem": f"Cobrança registrada! Os benefícios pendentes foram cancelados e o Rank caiu para {novo_rank}."
+        }
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))

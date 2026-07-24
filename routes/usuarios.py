@@ -105,8 +105,9 @@ def fazer_login(login: LoginRequest):
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
+    # NOVO: Busca o rank do banco de dados junto com os outros dados
     cursor.execute(
-        "SELECT id, nome, email, is_admin, saldo, senha_hash, codigo_indicacao FROM utilizadores WHERE email = %s;",
+        "SELECT id, nome, email, is_admin, saldo, senha_hash, codigo_indicacao, rank FROM utilizadores WHERE email = %s;",
         (login.email,),
     )
     usuario = cursor.fetchone()
@@ -126,6 +127,8 @@ def fazer_login(login: LoginRequest):
 
     del usuario["senha_hash"]  # Remove a hash da resposta por segurança
     usuario["saldo"] = float(usuario["saldo"])
+    usuario["rank"] = usuario.get("rank", 0)  # Assegura que o rank seja enviado
+
     return {"mensagem": "Login aprovado", "usuario": usuario, "token": token}
 
 
@@ -140,9 +143,9 @@ def login_google(req: GoogleLoginRequest):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # 1. Verifica se o e-mail do Google já existe no banco
+        # 1. Verifica se o e-mail do Google já existe no banco (busca o rank)
         cursor.execute(
-            "SELECT id, nome, email, is_admin, saldo, codigo_indicacao FROM utilizadores WHERE email = %s;",
+            "SELECT id, nome, email, is_admin, saldo, codigo_indicacao, rank FROM utilizadores WHERE email = %s;",
             (req.email,),
         )
         usuario = cursor.fetchone()
@@ -156,6 +159,7 @@ def login_google(req: GoogleLoginRequest):
                 }
             )
             usuario["saldo"] = float(usuario["saldo"])
+            usuario["rank"] = usuario.get("rank", 0)
             return {
                 "mensagem": "Login aprovado",
                 "usuario": usuario,
@@ -174,14 +178,14 @@ def login_google(req: GoogleLoginRequest):
             )  # Senha padrão inacessível
 
             cursor.execute(
-                "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao, rank) VALUES (%s, %s, %s, %s, %s, 0) RETURNING id;",
                 (req.nome, req.email, senha_segura, req.telefone, meu_codigo),
             )
             novo_id = cursor.fetchone()["id"]
             conn.commit()
 
             cursor.execute(
-                "SELECT id, nome, email, is_admin, saldo, codigo_indicacao FROM utilizadores WHERE id = %s;",
+                "SELECT id, nome, email, is_admin, saldo, codigo_indicacao, rank FROM utilizadores WHERE id = %s;",
                 (novo_id,),
             )
             novo_usuario = cursor.fetchone()
@@ -193,6 +197,7 @@ def login_google(req: GoogleLoginRequest):
                 }
             )
             novo_usuario["saldo"] = float(novo_usuario["saldo"])
+            novo_usuario["rank"] = novo_usuario.get("rank", 0)
 
             return {
                 "mensagem": "Conta criada com sucesso!",
@@ -394,8 +399,9 @@ def listar_usuarios(admin_data=Depends(verificar_admin)):
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
+    # NOVO: Adicionado 'rank' na busca SQL
     cursor.execute(
-        "SELECT id, nome, email, telefone, saldo, is_admin FROM utilizadores ORDER BY nome ASC"
+        "SELECT id, nome, email, telefone, saldo, is_admin, rank FROM utilizadores ORDER BY nome ASC"
     )
     res = cursor.fetchall()
     cursor.close()

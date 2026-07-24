@@ -67,6 +67,21 @@ credentials_efi = {
 # ==============================================================================
 
 
+def calcular_preco_vip(preco_base: float, rank_atual: int) -> float:
+    """
+    Calcula o preço final com desconto baseado no rank do cliente.
+    Cada rank = 1% de desconto. Teto máximo de 20%.
+    """
+    # Garante que o desconto nunca passe de 20, mesmo se o rank for 50
+    desconto_percentual = min(rank_atual, 20)
+
+    # Calcula o valor do desconto e subtrai do preço base
+    valor_desconto = preco_base * (desconto_percentual / 100.0)
+    preco_final = preco_base - valor_desconto
+
+    return round(preco_final, 2)  # Retorna com 2 casas decimais (ex: 39.90)
+
+
 def processar_sucesso_pagamento(
     payment_id, user_id, valor_pago, valor_bonus, cupom_nome
 ):
