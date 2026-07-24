@@ -67,6 +67,8 @@ def verificar_alugueis_vencidos():
     Cron Job (A cada 1 minuto):
     Derruba automaticamente locações que passaram da data final e joga aquele
     slot específico ('PRIMARIA' ou 'SECUNDARIA') para manutenção.
+    [ATUALIZADO]: Como o sistema precisou derrubar a conta, o cliente perde
+    o direito ao Cashback e Rank (status_beneficio = CANCELADO).
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -84,8 +86,10 @@ def verificar_alugueis_vencidos():
                     else "status_secundaria"
                 )
 
+                # NOVO: Explicita que o cashback é zero e o benefício está cancelado
                 cursor.execute(
-                    "UPDATE locacoes SET status = 'EXPIRADA' WHERE id = %s", (loc_id,)
+                    "UPDATE locacoes SET status = 'EXPIRADA', cashback_pendente = 0, status_beneficio = 'CANCELADO' WHERE id = %s",
+                    (loc_id,),
                 )
                 cursor.execute(
                     f"UPDATE contas_psn SET {coluna_status} = 'MANUTENCAO' WHERE id = %s",
@@ -103,16 +107,12 @@ def verificar_alugueis_vencidos():
 def processar_filas_automaticamente():
     """
     Cron Job (A cada 1 minuto):
-    O 'Maestro' da fila de espera. Olha para as contas com vagas DISPONIVEIS e,
-    se houver alguém aguardando aquele tipo_slot específico, converte a reserva
-    em um aluguel ativo automaticamente e avisa o cliente.
+    O 'Maestro' da fila de espera.
+    [ATUALIZADO]: Agora usa a nova coluna de 'rank' para furar fila no dia do lançamento.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # [BLINDAGEM MAXIMA] A query converte o relógio do servidor para o fuso do Brasil.
-        # Jogos do futuro são ignorados. O Python também recebe a variável 'is_dia_lancamento'
-        # para saber se aplica a regra de distribuição VIP.
         cursor.execute("""
             SELECT DISTINCT 
                 f.jogo_id, 
@@ -152,10 +152,9 @@ def processar_filas_automaticamente():
             contas_disponiveis = cursor.fetchall()
 
             for conta in contas_disponiveis:
-                # Se for O DIA do lançamento exato, usa a lógica VIP (quem tem mais aluguéis expira passa na frente).
-                # Se for um dia comum, atende estritamente por ordem de chegada na fila (FIFO).
+                # NOVO: A ordem agora usa o "rank" do utilizador em vez de COUNT de locações
                 ordem = (
-                    "(SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') DESC, data_solicitacao ASC LIMIT 1"
+                    "(SELECT rank FROM utilizadores WHERE id = fila_espera.utilizador_id) DESC, data_solicitacao ASC LIMIT 1"
                     if is_dia_lancamento
                     else "data_solicitacao ASC LIMIT 1"
                 )

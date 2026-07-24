@@ -19,7 +19,7 @@ def realizar_locacao(locacao: NovaLocacao):
     """
     [C] O Caixa da Loja.
     Recebe o pedido da vitrine, checa se a vaga específica (Primária ou Secundária)
-    está disponível, desconta o saldo e entrega as credenciais.
+    está disponível, calcula o desconto do Rank VIP, desconta o saldo e entrega as credenciais.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -32,28 +32,37 @@ def realizar_locacao(locacao: NovaLocacao):
 
         # Roteamento inteligente de preços e status baseado na vaga
         if locacao.tipo_slot == "PRIMARIA":
-            preco = (
+            preco_base = (
                 jogo_info["preco_aluguel_14"]
                 if locacao.dias_aluguel == 14
                 else jogo_info["preco_aluguel"]
             )
             coluna_status = "status_primaria"
         else:
-            preco = (
+            preco_base = (
                 jogo_info["preco_secundaria_14"]
                 if locacao.dias_aluguel == 14
                 else jogo_info["preco_secundaria"]
             )
             coluna_status = "status_secundaria"
 
-        # Trava Financeira
+        # Trava Financeira + APLICAÇÃO DO DESCONTO VIP
         cursor.execute(
-            "SELECT saldo FROM utilizadores WHERE id = %s", (locacao.utilizador_id,)
+            "SELECT saldo, rank FROM usuarios WHERE id = %s", (locacao.utilizador_id,)
         )
-        saldo = cursor.fetchone()["saldo"]
-        if saldo < preco:
+        usr_info = cursor.fetchone()
+        saldo = usr_info["saldo"]
+        rank_atual = usr_info.get("rank", 0)
+
+        # Calcula o desconto (Máximo 20%)
+        desconto_percentual = min(rank_atual, 20)
+        valor_desconto = preco_base * (desconto_percentual / 100.0)
+        preco_final = preco_base - valor_desconto
+
+        if saldo < preco_final:
             raise HTTPException(
-                status_code=402, detail="Saldo insuficiente na carteira."
+                status_code=402,
+                detail="Saldo insuficiente na carteira para o valor VIP.",
             )
 
         # Busca a primeira conta onde O SLOT ESPECÍFICO está livre e já bloqueia ele
@@ -70,10 +79,10 @@ def realizar_locacao(locacao: NovaLocacao):
                 detail=f"A vaga {locacao.tipo_slot} deste jogo acabou de ser alugada por outra pessoa. Atualize a página.",
             )
 
-        # Desconta o dinheiro e registra o recibo e a transação
+        # Desconta o dinheiro (com o desconto VIP) e registra o recibo e a transação
         cursor.execute(
             "UPDATE utilizadores SET saldo = saldo - %s WHERE id = %s",
-            (preco, locacao.utilizador_id),
+            (preco_final, locacao.utilizador_id),
         )
         cursor.execute(
             "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s) RETURNING id, data_fim;",
@@ -86,17 +95,18 @@ def realizar_locacao(locacao: NovaLocacao):
         )
         recibo = cursor.fetchone()
 
+        # No extrato, você avisa que ele pagou com desconto
         cursor.execute(
             "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)",
             (
                 locacao.utilizador_id,
-                preco,
-                f"Aluguel {locacao.tipo_slot} ({locacao.dias_aluguel}d): {jogo_info['titulo']}",
+                preco_final,
+                f"Aluguel {locacao.tipo_slot} ({locacao.dias_aluguel}d): {jogo_info['titulo']} - Rank {rank_atual}",
             ),
         )
         conn.commit()
         return {
-            "mensagem": f"Vaga {locacao.tipo_slot} alugada com sucesso!",
+            "mensagem": f"Vaga {locacao.tipo_slot} alugada com sucesso no valor VIP!",
             "pedido_id": recibo["id"],
             "data_devolucao": recibo["data_fim"],
             "psn_email": conta["email_login"],
@@ -115,9 +125,10 @@ def realizar_locacao(locacao: NovaLocacao):
 @router.post("/devolver")
 def devolver_jogo(dados: DevolucaoRequest):
     """
-    [U] A Máquina de Cashback.
-    Encerra a locação, injeta o bônus no limbo (cashback_pendente) e envia APENAS
-    o slot devolvido para a aba de manutenção do Admin.
+    [U] A Máquina de Cashback (Atualizada com Zero Trust).
+    Encerra a locação, injeta o bônus no limbo (cashback_pendente) com status 'PENDENTE',
+    e envia APENAS o slot devolvido para a aba de manutenção do Admin.
+    O cliente só ganha o Rank e o Saldo se o Admin aprovar na verificação da Sony.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -146,8 +157,9 @@ def devolver_jogo(dados: DevolucaoRequest):
             cashback_recompensa = valor_base + (dias_restantes * valor_base)
             coluna_status = "status_primaria"
 
+        # A NOVA TRAVA: Adicionamos o status_beneficio = 'PENDENTE'
         cursor.execute(
-            "UPDATE locacoes SET status = 'EXPIRADA', cashback_pendente = %s, data_fim = CURRENT_TIMESTAMP WHERE id = %s",
+            "UPDATE locacoes SET status = 'EXPIRADA', cashback_pendente = %s, status_beneficio = 'PENDENTE', data_fim = CURRENT_TIMESTAMP WHERE id = %s",
             (cashback_recompensa, dados.locacao_id),
         )
 
@@ -157,8 +169,10 @@ def devolver_jogo(dados: DevolucaoRequest):
             (loc["conta_psn_id"],),
         )
         conn.commit()
+
+        # MENSAGEM ALTERADA: Educando o cliente sobre a auditoria
         return {
-            "mensagem": "Devolução confirmada! A recompensa cairá na sua carteira em breve."
+            "mensagem": "Devolução iniciada! A conta está em análise. O seu Rank e Cashback cairão na carteira assim que o sistema confirmar a desativação."
         }
     except Exception as e:
         conn.rollback()
@@ -247,10 +261,12 @@ def entrar_fila(reserva: NovaReserva):
     [C] Coloca o cliente na fila de espera.
     Isola a lógica completamente: se o cliente clica para entrar na fila da Secundária,
     ele entra em um "túnel" de espera diferente do cliente que quer a Primária.
+    AGORA COM DESCONTO VIP E NOVA LÓGICA DE PRIORIDADE!
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # 1. Verifica se já está na fila
         cursor.execute(
             "SELECT id FROM fila_espera WHERE utilizador_id = %s AND jogo_id = %s AND tipo_slot = %s AND status = 'AGUARDANDO'",
             (reserva.utilizador_id, reserva.jogo_id, reserva.tipo_slot),
@@ -261,6 +277,7 @@ def entrar_fila(reserva: NovaReserva):
                 detail=f"Você já está na fila para a vaga {reserva.tipo_slot} deste jogo.",
             )
 
+        # 2. Puxa os dados do jogo
         cursor.execute(
             "SELECT titulo, preco_aluguel, preco_aluguel_14, preco_secundaria, preco_secundaria_14, data_lancamento FROM jogos WHERE id = %s",
             (reserva.jogo_id,),
@@ -268,31 +285,43 @@ def entrar_fila(reserva: NovaReserva):
         jogo_info = cursor.fetchone()
 
         if reserva.tipo_slot == "PRIMARIA":
-            preco = (
+            preco_base = (
                 jogo_info["preco_aluguel_14"]
                 if reserva.dias_aluguel == 14
                 else jogo_info["preco_aluguel"]
             )
         else:
-            preco = (
+            preco_base = (
                 jogo_info["preco_secundaria_14"]
                 if reserva.dias_aluguel == 14
                 else jogo_info["preco_secundaria"]
             )
 
+        # 3. Puxa Saldo e Rank do Cliente
+        # (Nota: estou usando 'utilizadores', assumindo que é o nome da sua tabela de usuários)
         cursor.execute(
-            "SELECT saldo FROM utilizadores WHERE id = %s", (reserva.utilizador_id,)
+            "SELECT saldo, rank FROM utilizadores WHERE id = %s",
+            (reserva.utilizador_id,),
         )
-        if cursor.fetchone()["saldo"] < preco:
+        usr_info = cursor.fetchone()
+        saldo = usr_info["saldo"]
+        rank_atual = usr_info.get("rank", 0)
+
+        # 4. APLICAÇÃO DO DESCONTO VIP MÁXIMO DE 20%
+        desconto_percentual = min(rank_atual, 20)
+        valor_desconto = preco_base * (desconto_percentual / 100.0)
+        preco_final = preco_base - valor_desconto
+
+        if saldo < preco_final:
             raise HTTPException(
                 status_code=402,
                 detail="Saldo insuficiente na carteira para entrar na fila.",
             )
 
-        # Cobra e Enfileira
+        # 5. Cobra o valor com desconto e Enfileira
         cursor.execute(
             "UPDATE utilizadores SET saldo = saldo - %s WHERE id = %s",
-            (preco, reserva.utilizador_id),
+            (preco_final, reserva.utilizador_id),
         )
         cursor.execute(
             "INSERT INTO fila_espera (utilizador_id, jogo_id, dias_aluguel, tipo_slot) VALUES (%s, %s, %s, %s) RETURNING id",
@@ -305,16 +334,19 @@ def entrar_fila(reserva: NovaReserva):
         )
         reserva_id = cursor.fetchone()["id"]
 
+        # Extrato avisando que o preço teve desconto do rank
         cursor.execute(
             "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, %s)",
             (
                 reserva.utilizador_id,
-                preco,
-                f"Fila {reserva.tipo_slot} ({reserva.dias_aluguel}d): {jogo_info['titulo']}",
+                preco_final,
+                f"Fila {reserva.tipo_slot} ({reserva.dias_aluguel}d): {jogo_info['titulo']} - Rank {rank_atual}",
             ),
         )
 
-        # Lógica de Rank VIP (Aplica apenas dentro do mesmo tipo de Slot)
+        # ==============================================================================
+        # 6. Lógica de Rank VIP (Aplica apenas dentro do mesmo tipo de Slot)
+        # ==============================================================================
         hoje_str = datetime.now().strftime("%Y-%m-%d")
         eh_pre_venda = (
             jogo_info["data_lancamento"]
@@ -322,59 +354,53 @@ def entrar_fila(reserva: NovaReserva):
         )
 
         if eh_pre_venda:
+            # Puxa a data limite
             cursor.execute(
-                "SELECT COUNT(*) as qtd FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA'",
-                (reserva.utilizador_id,),
+                "SELECT data_lancamento, (SELECT MIN(data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = %s AND l.status = 'ATIVA' AND l.tipo_slot = %s) as prox FROM jogos WHERE id = %s",
+                (reserva.jogo_id, reserva.tipo_slot, reserva.jogo_id),
             )
-            meus_alugueis_qtd = cursor.fetchone()["qtd"]
+            jogo_meta = cursor.fetchone()
 
-            if meus_alugueis_qtd > 0:
+            base_date = datetime.now()
+            if jogo_meta["data_lancamento"]:
+                dl = datetime.combine(jogo_meta["data_lancamento"], datetime.min.time())
+                if dl > base_date:
+                    base_date = dl
+            if jogo_meta["prox"] and jogo_meta["prox"] > base_date:
+                base_date = jogo_meta["prox"]
+
+            # NOVIDADE: A query que detecta quem foi ultrapassado agora compara o 'rank' direto!
+            cursor.execute(
+                """
+                SELECT f.id, f.utilizador_id,
+                (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND f2.tipo_slot = f.tipo_slot AND f2.data_solicitacao < f.data_solicitacao AND f2.id != %s) as dias_frente_antes
+                FROM fila_espera f 
+                WHERE f.jogo_id = %s AND f.status = 'AGUARDANDO' AND f.tipo_slot = %s AND f.utilizador_id != %s
+                AND (SELECT rank FROM utilizadores WHERE id = f.utilizador_id) < %s
+                """,
+                (
+                    reserva_id,
+                    reserva.jogo_id,
+                    reserva.tipo_slot,
+                    reserva.utilizador_id,
+                    rank_atual,
+                ),
+            )
+            bumped = cursor.fetchall()
+
+            # Avisa os clientes que foram ultrapassados na fila pelo sistema VIP
+            for b in bumped:
+                data_antiga = base_date + timedelta(days=b["dias_frente_antes"])
+                data_nova = data_antiga + timedelta(days=reserva.dias_aluguel)
+                msg = f"Devido à prioridade de Rank VIP, a previsão da sua Fila ({reserva.tipo_slot}) do jogo {jogo_info['titulo']} mudou para {data_nova.strftime('%d/%m/%Y')}."
                 cursor.execute(
-                    "SELECT data_lancamento, (SELECT MIN(data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = %s AND l.status = 'ATIVA' AND l.tipo_slot = %s) as prox FROM jogos WHERE id = %s",
-                    (reserva.jogo_id, reserva.tipo_slot, reserva.jogo_id),
+                    "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
+                    (b["utilizador_id"], b["id"], jogo_info["titulo"], msg),
                 )
-                jogo_meta = cursor.fetchone()
-
-                base_date = datetime.now()
-                if jogo_meta["data_lancamento"]:
-                    dl = datetime.combine(
-                        jogo_meta["data_lancamento"], datetime.min.time()
-                    )
-                    if dl > base_date:
-                        base_date = dl
-                if jogo_meta["prox"] and jogo_meta["prox"] > base_date:
-                    base_date = jogo_meta["prox"]
-
-                cursor.execute(
-                    """
-                    SELECT f.id, f.utilizador_id,
-                    (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND f2.tipo_slot = f.tipo_slot AND f2.data_solicitacao < f.data_solicitacao AND f2.id != %s) as dias_frente_antes
-                    FROM fila_espera f 
-                    WHERE f.jogo_id = %s AND f.status = 'AGUARDANDO' AND f.tipo_slot = %s AND f.utilizador_id != %s
-                    AND (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = f.utilizador_id AND status = 'EXPIRADA') < %s
-                    """,
-                    (
-                        reserva_id,
-                        reserva.jogo_id,
-                        reserva.tipo_slot,
-                        reserva.utilizador_id,
-                        meus_alugueis_qtd,
-                    ),
-                )
-                bumped = cursor.fetchall()
-
-                for b in bumped:
-                    data_antiga = base_date + timedelta(days=b["dias_frente_antes"])
-                    data_nova = data_antiga + timedelta(days=reserva.dias_aluguel)
-                    msg = f"Devido à prioridade de Rank, a previsão da sua Fila ({reserva.tipo_slot}) do jogo {jogo_info['titulo']} mudou para {data_nova.strftime('%d/%m/%Y')}."
-                    cursor.execute(
-                        "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
-                        (b["utilizador_id"], b["id"], jogo_info["titulo"], msg),
-                    )
 
         conn.commit()
         return {
-            "mensagem": f"Você entrou na Fila ({reserva.tipo_slot})! Valor descontado da carteira."
+            "mensagem": f"Você entrou na Fila ({reserva.tipo_slot}) com Desconto VIP aplicado!"
         }
     except Exception as e:
         conn.rollback()

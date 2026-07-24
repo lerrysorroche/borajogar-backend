@@ -207,10 +207,14 @@ class ResetSenhaRequest(BaseModel):
 
 
 class AplicarMultaRequest(BaseModel):
-    """Gera uma transação negativa de R$ 50,00 para clientes que não desativaram o console."""
+    """
+    Acionado pelo botão 'Cobrar no WhatsApp'.
+    Além da multa financeira, o backend cortará o Rank pela metade
+    e cancelará Cashbacks pendentes.
+    """
 
     utilizador_id: int
-    valor: float = 50.0
+    valor: float = 0.0  # Mudei o padrão para 0.0 para ser flexível (só punir Rank)
 
 
 class AjusteSaldoRequest(BaseModel):
