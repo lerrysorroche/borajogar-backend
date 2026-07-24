@@ -225,7 +225,9 @@ def liberar_conta_manutencao(
             usr = ultima_loc["utilizador_id"]
 
             # Sobe o Rank
-            cursor.execute("UPDATE usuarios SET rank = rank + 1 WHERE id = %s", (usr,))
+            cursor.execute(
+                "UPDATE utilizadores SET rank = rank + 1 WHERE id = %s", (usr,)
+            )
 
             # Injeta o dinheiro de devolução (se houver)
             if ultima_loc["cashback_pendente"] > 0:
@@ -254,7 +256,7 @@ def liberar_conta_manutencao(
 
         query_fila = """SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s ORDER BY {} data_solicitacao ASC LIMIT 1"""
         ordem = (
-            "(SELECT rank FROM usuarios WHERE id = fila_espera.utilizador_id) DESC,"
+            "(SELECT rank FROM utilizadores WHERE id = fila_espera.utilizador_id) DESC,"
             if eh_pre_venda
             else ""
         )
@@ -359,7 +361,7 @@ def aplicar_multa(dados: AplicarMultaRequest, admin_data=Depends(verificar_admin
 
         # 3. Corta o Rank pela Metade
         cursor.execute(
-            "SELECT rank FROM usuarios WHERE id = %s", (dados.utilizador_id,)
+            "SELECT rank FROM utilizadores WHERE id = %s", (dados.utilizador_id,)
         )
         usuario = cursor.fetchone()
 
@@ -368,7 +370,7 @@ def aplicar_multa(dados: AplicarMultaRequest, admin_data=Depends(verificar_admin
             rank_atual = usuario["rank"]
             novo_rank = rank_atual // 2
             cursor.execute(
-                "UPDATE usuarios SET rank = %s WHERE id = %s",
+                "UPDATE utilizadores SET rank = %s WHERE id = %s",
                 (novo_rank, dados.utilizador_id),
             )
 
