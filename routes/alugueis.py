@@ -155,7 +155,8 @@ def devolver_jogo(dados: DevolucaoRequest):
         else:
             horas = float(loc["horas"])
             dias_restantes = max(0, int(horas // 24))
-            cashback_recompensa = valor_base + (dias_restantes * valor_base)
+            # ATUALIZAÇÃO: Taxa fixa (R$ 2) + R$ 1,00 por cada dia antecipado
+            cashback_recompensa = valor_base + (dias_restantes * 1.0)
             coluna_status = "status_primaria"
 
         # A NOVA TRAVA: Adicionamos o status_beneficio = 'PENDENTE'
