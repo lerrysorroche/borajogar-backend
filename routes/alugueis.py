@@ -48,7 +48,8 @@ def realizar_locacao(locacao: NovaLocacao):
 
         # Trava Financeira + APLICAÇÃO DO DESCONTO VIP
         cursor.execute(
-            "SELECT saldo, rank FROM usuarios WHERE id = %s", (locacao.utilizador_id,)
+            "SELECT saldo, rank FROM utilizadores WHERE id = %s",
+            (locacao.utilizador_id,),
         )
         usr_info = cursor.fetchone()
         saldo = usr_info["saldo"]
