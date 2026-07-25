@@ -37,6 +37,50 @@ def gerar_codigo_convite(nome):
     return f"{letras}{nums}"
 
 
+def disparar_email_confirmacao(email_destino, nome, codigo):
+    """
+    Usa a infraestrutura do Brevo para enviar o código de 6 dígitos.
+    Roda de forma silenciosa para não travar a requisição do usuário.
+    """
+    try:
+        remetente = os.getenv("EMAIL_REMETENTE")
+        chave_api = os.getenv("BREVO_API_KEY")
+        if chave_api and remetente:
+            url = "https://api.brevo.com/v3/smtp/email"
+            headers = {
+                "accept": "application/json",
+                "api-key": chave_api,
+                "content-type": "application/json",
+            }
+            html_body = f"""
+            <div style="font-family: sans-serif; max-w-md; margin: auto; padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #09090b; color: #fff;">
+                <h2 style="color: #3b82f6;">Bem-vindo(a) à BORA JOGAR! 🎮</h2>
+                <p style="color: #d4d4d8;">Olá, {nome}! Falta apenas um passo para você liberar sua conta e começar a jogar.</p>
+                <p style="color: #d4d4d8;">Use o código de segurança abaixo no site para confirmar seu e-mail:</p>
+                <div style="background-color: #18181b; padding: 15px; border-radius: 8px; text-align: center; margin: 20px 0;">
+                    <span style="font-size: 28px; font-weight: bold; letter-spacing: 5px; color: #10b981;">{codigo}</span>
+                </div>
+                <p style="font-size: 12px; color: #71717a;">Se você não solicitou este cadastro, pode ignorar este e-mail.</p>
+            </div>
+            """
+            payload = {
+                "sender": {"name": "Equipe Bora Jogar", "email": remetente},
+                "to": [{"email": email_destino}],
+                "subject": "🎮 Bora Jogar - Código de Confirmação",
+                "htmlContent": html_body,
+            }
+            req_http = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req_http) as response:
+                pass
+    except Exception as e:
+        print(f"Aviso: Falha ao enviar e-mail de confirmação: {e}")
+
+
 # ==============================================================================
 # AUTENTICAÇÃO E REGISTRO
 # ==============================================================================
@@ -45,10 +89,8 @@ def gerar_codigo_convite(nome):
 @router.post("/usuarios", status_code=201)
 def cadastrar_usuario(usuario: UsuarioNovo):
     """
-    [C] Criação de Conta (Sign Up Clássico).
-    Criptografa a senha antes de salvar no banco e gera o código de indicação.
-    Se o cliente usou o código de um amigo, cria o vínculo ('indicado_por') para
-    pagamento futuro do bônus de cashback na primeira recarga.
+    [C] Criação de Conta com Verificação.
+    Agora o usuário nasce com 'email_verificado = FALSE' e recebe um código de 6 dígitos.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -57,7 +99,6 @@ def cadastrar_usuario(usuario: UsuarioNovo):
         meu_codigo = gerar_codigo_convite(usuario.nome)
         indicado_por_id = None
 
-        # Verifica se o código de indicação é válido e pega o ID do amigo
         if usuario.codigo_indicacao:
             cursor.execute(
                 "SELECT id FROM utilizadores WHERE codigo_indicacao = %s",
@@ -67,8 +108,11 @@ def cadastrar_usuario(usuario: UsuarioNovo):
             if amigo:
                 indicado_por_id = amigo[0]
 
+        # Gera código de 6 dígitos
+        codigo_6_digitos = "".join(random.choices(string.digits, k=6))
+
         cursor.execute(
-            "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao, indicado_por) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
+            "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao, indicado_por, rank, email_verificado, codigo_verificacao) VALUES (%s, %s, %s, %s, %s, %s, 0, FALSE, %s) RETURNING id;",
             (
                 usuario.nome,
                 usuario.email,
@@ -76,14 +120,18 @@ def cadastrar_usuario(usuario: UsuarioNovo):
                 usuario.telefone,
                 meu_codigo,
                 indicado_por_id,
+                codigo_6_digitos,
             ),
         )
         novo_id = cursor.fetchone()[0]
         conn.commit()
+
+        # Dispara o e-mail em segundo plano
+        disparar_email_confirmacao(usuario.email, usuario.nome, codigo_6_digitos)
+
         return {
-            "mensagem": "Cliente cadastrado com sucesso!",
-            "id": novo_id,
-            "nome": usuario.nome,
+            "mensagem": "Cadastro criado! Verifique seu e-mail para ativar a conta.",
+            "email_enviado": True,
         }
     except Exception as e:
         conn.rollback()
@@ -96,18 +144,49 @@ def cadastrar_usuario(usuario: UsuarioNovo):
         conn.close()
 
 
+@router.post("/verificar-email")
+def verificar_codigo_email(req: VerificarEmailRequest):
+    """
+    [U] Valida o código de 6 dígitos e libera a conta para fazer login.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT id FROM utilizadores WHERE email = %s AND codigo_verificacao = %s",
+            (req.email, req.codigo),
+        )
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=400, detail="Código inválido ou e-mail incorreto."
+            )
+
+        # Ativa a conta e limpa o código para evitar reuso
+        cursor.execute(
+            "UPDATE utilizadores SET email_verificado = TRUE, codigo_verificacao = NULL WHERE email = %s",
+            (req.email,),
+        )
+        conn.commit()
+        return {"mensagem": "E-mail verificado com sucesso! Você já pode fazer login."}
+    except Exception as e:
+        conn.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail="Erro no servidor.")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.post("/login")
 def fazer_login(login: LoginRequest):
     """
-    [R] Login Clássico (E-mail e Senha).
-    Valida a senha descriptografando o hash do banco. Em caso de sucesso,
-    gera um Token JWT para manter o cliente logado no Frontend de forma segura.
+    [R] Login Clássico com Trava de Verificação.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # NOVO: Busca o rank do banco de dados junto com os outros dados
     cursor.execute(
-        "SELECT id, nome, email, is_admin, saldo, senha_hash, codigo_indicacao, rank FROM utilizadores WHERE email = %s;",
+        "SELECT id, nome, email, is_admin, saldo, senha_hash, codigo_indicacao, rank, email_verificado FROM utilizadores WHERE email = %s;",
         (login.email,),
     )
     usuario = cursor.fetchone()
@@ -116,6 +195,13 @@ def fazer_login(login: LoginRequest):
 
     if not usuario or not verificar_senha(login.senha, usuario["senha_hash"]):
         raise HTTPException(status_code=401, detail="E-mail ou senha incorretos.")
+
+    # A TRAVA DE SEGURANÇA AQUI
+    if not usuario.get("email_verificado"):
+        raise HTTPException(
+            status_code=403,
+            detail="conta_pendente",  # Mandamos esse código exato para o React saber que tem que abrir a tela de digitar o código
+        )
 
     token = criar_token_acesso(
         {
