@@ -33,6 +33,12 @@ class VerificarEmailRequest(BaseModel):
     codigo: str
 
 
+class ReenviarCodigoRequest(BaseModel):
+    """Payload para solicitar um novo código de verificação."""
+
+    email: str
+
+
 class EsqueciSenhaRequest(BaseModel):
     """Recebe o e-mail do cliente para envio do link/código de recuperação."""
 
