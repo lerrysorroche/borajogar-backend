@@ -26,6 +26,13 @@ class LoginRequest(BaseModel):
     senha: str
 
 
+class VerificarEmailRequest(BaseModel):
+    """Payload para a validação do código de 6 dígitos enviado por e-mail."""
+
+    email: str
+    codigo: str
+
+
 class EsqueciSenhaRequest(BaseModel):
     """Recebe o e-mail do cliente para envio do link/código de recuperação."""
 
