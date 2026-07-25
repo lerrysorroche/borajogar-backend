@@ -178,6 +178,52 @@ def verificar_codigo_email(req: VerificarEmailRequest):
         conn.close()
 
 
+@router.post("/reenviar-codigo")
+def reenviar_codigo(req: ReenviarCodigoRequest):
+    """
+    [U] Gera um novo código de 6 dígitos e reenvia para o cliente.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute(
+            "SELECT id, nome, email_verificado FROM utilizadores WHERE email = %s",
+            (req.email,),
+        )
+        usuario = cursor.fetchone()
+
+        if not usuario:
+            raise HTTPException(status_code=404, detail="E-mail não encontrado.")
+        if usuario["email_verificado"]:
+            raise HTTPException(
+                status_code=400, detail="Esta conta já está ativada. Faça login."
+            )
+
+        # Gera novo código
+        novo_codigo = "".join(random.choices(string.digits, k=6))
+
+        cursor.execute(
+            "UPDATE utilizadores SET codigo_verificacao = %s WHERE email = %s",
+            (novo_codigo, req.email),
+        )
+        conn.commit()
+
+        # Dispara o e-mail
+        disparar_email_confirmacao(req.email, usuario["nome"], novo_codigo)
+
+        return {
+            "mensagem": "Novo código enviado com sucesso! Verifique sua caixa de entrada."
+        }
+    except Exception as e:
+        conn.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail="Erro interno ao reenviar código.")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.post("/login")
 def fazer_login(login: LoginRequest):
     """
