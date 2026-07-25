@@ -17,6 +17,8 @@ from models import (
     AjusteSaldoRequest,
     LerNotificacao,
     GoogleLoginRequest,
+    VerificarEmailRequest,
+    ReenviarCodigoRequest,
 )
 
 router = APIRouter(tags=["Usuarios"])
