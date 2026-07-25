@@ -181,35 +181,50 @@ def verificar_codigo_email(req: VerificarEmailRequest):
 @router.post("/login")
 def fazer_login(login: LoginRequest):
     """
-    [R] Login Clássico com Trava de Verificação.
+    [R] Login Clássico com Trava de Verificação (Blindado).
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute(
-        "SELECT id, nome, email, is_admin, saldo, senha_hash, codigo_indicacao, rank, email_verificado FROM utilizadores WHERE email = %s;",
-        (login.email,),
-    )
-    usuario = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    try:
+        cursor.execute(
+            "SELECT id, nome, email, is_admin, saldo, senha_hash, codigo_indicacao, rank, email_verificado FROM utilizadores WHERE email = %s;",
+            (login.email,),
+        )
+        usuario = cursor.fetchone()
 
-    if not usuario or not verificar_senha(login.senha, usuario["senha_hash"]):
-        raise HTTPException(status_code=401, detail="E-mail ou senha incorretos.")
+        if not usuario or not verificar_senha(login.senha, usuario["senha_hash"]):
+            raise HTTPException(status_code=401, detail="E-mail ou senha incorretos.")
 
-    # A TRAVA DE SEGURANÇA AQUI
-    if not usuario.get("email_verificado"):
-        raise HTTPException(
-            status_code=403,
-            detail="conta_pendente",  # Mandamos esse código exato para o React saber que tem que abrir a tela de digitar o código
+        # A TRAVA DE SEGURANÇA DO E-MAIL
+        if not usuario.get("email_verificado"):
+            raise HTTPException(status_code=403, detail="conta_pendente")
+
+        token = criar_token_acesso(
+            {
+                "id": usuario["id"],
+                "email": usuario["email"],
+                "is_admin": usuario["is_admin"],
+            }
         )
 
-    token = criar_token_acesso(
-        {
-            "id": usuario["id"],
-            "email": usuario["email"],
-            "is_admin": usuario["is_admin"],
-        }
-    )
+        del usuario["senha_hash"]  # Remove a hash da resposta por segurança
+        usuario["saldo"] = float(usuario["saldo"])
+        usuario["rank"] = usuario.get("rank", 0)
+
+        return {"mensagem": "Login aprovado", "usuario": usuario, "token": token}
+
+    except Exception as e:
+        conn.rollback()
+        # Se for um erro que nós mesmos geramos (Ex: Senha incorreta), repassa.
+        if isinstance(e, HTTPException):
+            raise e
+        # Se for um erro do banco de dados, devolve o erro real para o Frontend em vez de travar o CORS
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno no Banco de Dados: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        conn.close()
 
     del usuario["senha_hash"]  # Remove a hash da resposta por segurança
     usuario["saldo"] = float(usuario["saldo"])
