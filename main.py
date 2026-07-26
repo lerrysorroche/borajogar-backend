@@ -1,24 +1,45 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
+import os
 
+from auth import verificar_admin
 from database import get_db_connection
 from notificacoes import enviar_email
 from routes import usuarios, jogos, pagamentos, alugueis, admin, whatsapp
 from routes.pagamentos import processar_sucesso_pagamento, credentials_efi
 from routes.whatsapp import enviar_template_whatsapp, normalizar_telefone
 from efipay import EfiPay
+import stripe
 
 app = FastAPI(title="API Locadora PS5")
 
 # ==============================================================================
 # 1. MIDDLEWARES E SEGURANÇA
 # ==============================================================================
+# Origens autorizadas a chamar a API pelo navegador.
+# Antes era allow_origins=["*"] junto com allow_credentials=True — combinação em
+# que o Starlette devolve de volta a origem de quem perguntou, ou seja, qualquer
+# site na internet podia usar esta API como backend próprio.
+# Webhooks (Stripe, Efí, Meta) são servidor-para-servidor e não passam por CORS,
+# então esta lista não afeta nenhum deles.
+ORIGENS_PERMITIDAS = [
+    "https://www.locadoraborajogar.com.br",
+    "https://locadoraborajogar.com.br",
+    "http://localhost:5173",  # Vite em desenvolvimento
+    "http://localhost:3000",
+]
+_frontend_url = os.getenv("FRONTEND_URL", "").rstrip("/")
+if _frontend_url and _frontend_url not in ORIGENS_PERMITIDAS:
+    ORIGENS_PERMITIDAS.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ORIGENS_PERMITIDAS,
+    # Previews de branch do Vercel (staging), que mudam de URL a cada deploy.
+    allow_origin_regex=r"https://[a-z0-9-]+\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -270,8 +291,14 @@ def processar_filas_automaticamente():
 def verificar_pix_perdidos():
     """
     Cron Job (A cada 1 minuto):
-    Rastreador de Pix. Vai na Efí bater na porta e resgatar transações pendentes
-    que não dispararam Webhooks.
+    Rastreador de pagamentos. Vai na Efí e na Stripe bater na porta e resgatar
+    transações pendentes que não dispararam Webhooks.
+
+    É a rede de segurança das rotas de status: como elas agora exigem token,
+    cliente deslogado ou com token vencido não confirma o pagamento pelo
+    navegador — mas o dinheiro cai aqui em no máximo 1 minuto de qualquer jeito.
+    Por isso passou a cobrir também as sessões da Stripe ('cs_...'), que antes
+    eram puladas e só tinham o webhook como caminho.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -285,20 +312,25 @@ def verificar_pix_perdidos():
             efi = EfiPay(credentials_efi)
             for pedido in pendentes:
                 txid = pedido["id"]
-                if not txid.startswith("cs_"):
-                    try:
+                try:
+                    if txid.startswith("cs_"):
+                        sessao = stripe.checkout.Session.retrieve(txid)
+                        foi_pago = sessao.payment_status == "paid"
+                    else:
                         detalhes = efi.pix_detail_charge(params={"txid": txid})
-                        if detalhes.get("status") == "CONCLUIDA":
-                            print(f"💰 PIX PERDIDO RECUPERADO VIA CRON! TXID: {txid}")
-                            processar_sucesso_pagamento(
-                                txid,
-                                pedido["utilizador_id"],
-                                pedido["valor_pago"],
-                                pedido["valor_bonus"],
-                                pedido["cupom"],
-                            )
-                    except Exception:
-                        pass
+                        foi_pago = detalhes.get("status") == "CONCLUIDA"
+
+                    if foi_pago:
+                        print(f"💰 PAGAMENTO PERDIDO RECUPERADO VIA CRON! ID: {txid}")
+                        processar_sucesso_pagamento(
+                            txid,
+                            pedido["utilizador_id"],
+                            pedido["valor_pago"],
+                            pedido["valor_bonus"],
+                            pedido["cupom"],
+                        )
+                except Exception:
+                    pass
     except Exception as e:
         print(f"Erro no rastreador de Pix Cron: {e}")
     finally:
@@ -334,8 +366,14 @@ def limpar_cupons_surpresa_cron():
 
 
 @app.post("/admin/forcar-processamento-filas", tags=["Admin"])
-def forcar_filas():
-    """Botão manual para destravar a fila caso o Cron Job do Render hiberne."""
+def forcar_filas(admin_data=Depends(verificar_admin)):
+    """
+    Botão manual para destravar a fila caso o Cron Job do Render hiberne.
+
+    Exige admin: a rota é cara (varre filas, cria locações e dispara e-mail +
+    WhatsApp) e estava aberta, então qualquer um podia mandar a API processar
+    filas em looping e queimar as cotas de envio.
+    """
     processar_filas_automaticamente()
     return {"mensagem": "O motor de filas rodou com sucesso!"}
 

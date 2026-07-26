@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import pyotp
 
 from database import get_db_connection
-from auth import verificar_admin
+from auth import verificar_admin, verificar_usuario
 from models import NovaLocacao, NovaReserva, CancelarReserva, DevolucaoRequest
 
 router = APIRouter(tags=["Alugueis e Reservas"])
@@ -15,12 +15,16 @@ router = APIRouter(tags=["Alugueis e Reservas"])
 
 
 @router.post("/locacoes", status_code=201)
-def realizar_locacao(locacao: NovaLocacao):
+def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
     """
     [C] O Caixa da Loja.
     Recebe o pedido da vitrine, checa se a vaga específica (Primária ou Secundária)
     está disponível, calcula o desconto do Rank VIP, desconta o saldo e entrega as credenciais.
+
+    O cliente sai do token: o id do corpo permitia alugar gastando o saldo de
+    outra pessoa e receber as credenciais da conta PSN na resposta.
     """
+    locacao.utilizador_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -132,13 +136,14 @@ def realizar_locacao(locacao: NovaLocacao):
 
 
 @router.post("/devolver")
-def devolver_jogo(dados: DevolucaoRequest):
+def devolver_jogo(dados: DevolucaoRequest, usuario=Depends(verificar_usuario)):
     """
     [U] A Máquina de Cashback (Atualizada com Zero Trust).
     Encerra a locação, injeta o bônus no limbo (cashback_pendente) com status 'PENDENTE',
     e envia APENAS o slot devolvido para a aba de manutenção do Admin.
     O cliente só ganha o Rank e o Saldo se o Admin aprovar na verificação da Sony.
     """
+    dados.utilizador_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -193,11 +198,16 @@ def devolver_jogo(dados: DevolucaoRequest):
 
 
 @router.get("/meus-alugueis/{usuario_id}")
-def buscar_alugueis_usuario(usuario_id: int):
+def buscar_alugueis_usuario(usuario_id: int, usuario=Depends(verificar_usuario)):
     """
     [R] Monta a interface "Meus Acessos" (Cards Verdes).
     Retorna os dados da conta e avisa o React qual é o tipo de slot (Para o React mostrar "Vaga Primária" ou Secundária).
+
+    O id sai do token, não da URL. Esta rota devolve email_login e senha_login
+    das contas PSN: aberta e indexada por id sequencial, bastava percorrer
+    /meus-alugueis/1, /2, /3... para baixar as credenciais do estoque inteiro.
     """
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -216,12 +226,19 @@ def buscar_alugueis_usuario(usuario_id: int):
 
 
 @router.get("/gerar-2fa/{locacao_id}/{usuario_id}")
-def gerar_codigo_2fa(locacao_id: int, usuario_id: int):
+def gerar_codigo_2fa(
+    locacao_id: int, usuario_id: int, usuario=Depends(verificar_usuario)
+):
     """
     [R/U] O Autenticador.
     Verifica se o cliente da vaga SECUNDÁRIA já apertou este botão alguma vez na vida.
     Se sim, joga um Erro 403 e tranca a porta para evitar o "Golpe da Sony".
+
+    O id sai do token: esta rota devolve o código 2FA vivo da conta PSN, e
+    estava aberta. O WHERE por utilizador_id abaixo já limitava o resultado,
+    mas nada impedia alguém de passar o id de outra pessoa na URL.
     """
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -266,13 +283,14 @@ def gerar_codigo_2fa(locacao_id: int, usuario_id: int):
 
 
 @router.post("/reservas", status_code=201)
-def entrar_fila(reserva: NovaReserva):
+def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
     """
     [C] Coloca o cliente na fila de espera.
     Isola a lógica completamente: se o cliente clica para entrar na fila da Secundária,
     ele entra em um "túnel" de espera diferente do cliente que quer a Primária.
     AGORA COM DESCONTO VIP E NOVA LÓGICA DE PRIORIDADE!
     """
+    reserva.utilizador_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -431,12 +449,13 @@ def entrar_fila(reserva: NovaReserva):
 
 
 @router.post("/reservas/cancelar")
-def cancelar_reserva(dados: CancelarReserva):
+def cancelar_reserva(dados: CancelarReserva, usuario=Depends(verificar_usuario)):
     """
     [D] O Desistente.
     Cliente sai da fila por conta própria (na aba Meus Acessos ou via Notificação)
     e o dinheiro volta instantaneamente para a carteira dele.
     """
+    dados.utilizador_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -487,12 +506,13 @@ def cancelar_reserva(dados: CancelarReserva):
 
 
 @router.get("/minhas-reservas/{usuario_id}")
-def buscar_reservas_usuario(usuario_id: int):
+def buscar_reservas_usuario(usuario_id: int, usuario=Depends(verificar_usuario)):
     """
     [R] O Termômetro do Cliente.
     Calcula a estimativa de tempo que o cliente vai demorar para pegar o jogo.
     Agora isolado: se ele reservou Secundária, só soma os dias de quem está na frente dele na fila Secundária.
     """
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(

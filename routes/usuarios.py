@@ -7,7 +7,13 @@ import urllib.request
 import json
 
 from database import get_db_connection
-from auth import verificar_admin, gerar_hash_senha, verificar_senha, criar_token_acesso
+from auth import (
+    verificar_admin,
+    verificar_usuario,
+    gerar_hash_senha,
+    verificar_senha,
+    criar_token_acesso,
+)
 from models import (
     UsuarioNovo,
     LoginRequest,
@@ -431,11 +437,12 @@ def esqueci_senha(req: EsqueciSenhaRequest):
 
 
 @router.post("/mudar-senha")
-def mudar_senha(req: MudarSenhaRequest):
+def mudar_senha(req: MudarSenhaRequest, usuario=Depends(verificar_usuario)):
     """
     [U] Altera a senha do cliente por dentro do Dashboard (Meus Acessos).
     Exige a digitação da senha atual para garantir que é o próprio usuário alterando.
     """
+    req.utilizador_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -465,11 +472,12 @@ def mudar_senha(req: MudarSenhaRequest):
 
 
 @router.get("/usuarios/{usuario_id}/saldo")
-def buscar_saldo_real(usuario_id: int):
+def buscar_saldo_real(usuario_id: int, usuario=Depends(verificar_usuario)):
     """
     [R] Retorna a fonte da verdade do saldo do cliente direto do banco de dados.
     Usado intensamente pelo React após recargas e aluguéis para atualizar o visual.
     """
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -482,11 +490,12 @@ def buscar_saldo_real(usuario_id: int):
 
 
 @router.get("/extrato/{usuario_id}")
-def buscar_extrato_usuario(usuario_id: int):
+def buscar_extrato_usuario(usuario_id: int, usuario=Depends(verificar_usuario)):
     """
     [R] Alimenta a tabela de extrato da carteira do cliente.
     Mostra ENTRADAS e SAIDAS de recargas, aluguéis, multas e cashbacks gamificados.
     """
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -500,12 +509,13 @@ def buscar_extrato_usuario(usuario_id: int):
 
 
 @router.get("/notificacoes/{usuario_id}")
-def buscar_notificacoes(usuario_id: int):
+def buscar_notificacoes(usuario_id: int, usuario=Depends(verificar_usuario)):
     """
     [R] Busca os alertas não lidos do usuário.
     Principalmente os alertas de "Mudança de Data" gerados quando o sistema VIP
     empurra a data de um cliente de Rank menor para baixo na fila de espera.
     """
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
@@ -519,15 +529,19 @@ def buscar_notificacoes(usuario_id: int):
 
 
 @router.post("/notificacoes/ler")
-def ler_notificacao(dados: LerNotificacao):
+def ler_notificacao(dados: LerNotificacao, usuario=Depends(verificar_usuario)):
     """
     [U] Confirma que o cliente leu o alerta (botão "Entendi" do React)
     e oculta o modal laranja de aviso de mudança na fila.
+
+    O utilizador_id no WHERE impede marcar como lida a notificação de outra
+    pessoa só chutando o id.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE notificacoes SET lida = TRUE WHERE id = %s", (dados.notificacao_id,)
+        "UPDATE notificacoes SET lida = TRUE WHERE id = %s AND utilizador_id = %s",
+        (dados.notificacao_id, usuario["id"]),
     )
     conn.commit()
     cursor.close()
