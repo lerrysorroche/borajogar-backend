@@ -61,6 +61,22 @@ class GoogleLoginRequest(BaseModel):
     telefone: str = ""
 
 
+class AtualizarTelefoneRequest(BaseModel):
+    """
+    Usado no painel 'Meus Acessos' pelo cliente para definir/corrigir seu telefone.
+    O backend rejeita a alteração se o telefone já tiver sido verificado no WhatsApp.
+    """
+
+    telefone: str
+
+
+class VerificarWhatsAdminRequest(BaseModel):
+    """Botão manual 'Confirmar Whats' no Painel Admin, usado como rede de segurança
+    caso a confirmação automática via webhook da Meta falhe para um cliente específico."""
+
+    utilizador_id: int
+
+
 # ==============================================================================
 # MODELOS DE CATÁLOGO (JOGOS E ENQUETE)
 # ==============================================================================

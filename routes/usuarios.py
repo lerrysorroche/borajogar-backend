@@ -235,7 +235,7 @@ def fazer_login(login: LoginRequest):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute(
-            "SELECT id, nome, email, is_admin, saldo, senha_hash, codigo_indicacao, rank, email_verificado FROM utilizadores WHERE email = %s;",
+            "SELECT id, nome, email, telefone, is_admin, saldo, senha_hash, codigo_indicacao, rank, email_verificado, whatsapp_verificado FROM utilizadores WHERE email = %s;",
             (login.email,),
         )
         usuario = cursor.fetchone()
@@ -294,7 +294,7 @@ def login_google(req: GoogleLoginRequest):
     try:
         # 1. Verifica se o e-mail do Google já existe no banco (busca o rank)
         cursor.execute(
-            "SELECT id, nome, email, is_admin, saldo, codigo_indicacao, rank FROM utilizadores WHERE email = %s;",
+            "SELECT id, nome, email, telefone, is_admin, saldo, codigo_indicacao, rank, whatsapp_verificado FROM utilizadores WHERE email = %s;",
             (req.email,),
         )
         usuario = cursor.fetchone()
@@ -334,7 +334,7 @@ def login_google(req: GoogleLoginRequest):
             conn.commit()
 
             cursor.execute(
-                "SELECT id, nome, email, is_admin, saldo, codigo_indicacao, rank FROM utilizadores WHERE id = %s;",
+                "SELECT id, nome, email, telefone, is_admin, saldo, codigo_indicacao, rank, whatsapp_verificado FROM utilizadores WHERE id = %s;",
                 (novo_id,),
             )
             novo_usuario = cursor.fetchone()
@@ -550,7 +550,7 @@ def listar_usuarios(admin_data=Depends(verificar_admin)):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     # NOVO: Adicionado 'rank' na busca SQL
     cursor.execute(
-        "SELECT id, nome, email, telefone, saldo, is_admin, rank FROM utilizadores ORDER BY nome ASC"
+        "SELECT id, nome, email, telefone, saldo, is_admin, rank, whatsapp_verificado FROM utilizadores ORDER BY nome ASC"
     )
     res = cursor.fetchall()
     cursor.close()
@@ -571,13 +571,19 @@ def editar_usuario(
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cursor.execute("SELECT saldo FROM utilizadores WHERE id = %s", (usuario_id,))
+        cursor.execute(
+            "SELECT saldo, telefone FROM utilizadores WHERE id = %s", (usuario_id,)
+        )
         usuario_db = cursor.fetchone()
         if not usuario_db:
             raise HTTPException(status_code=404, detail="Usuário não encontrado.")
 
         saldo_atual = float(usuario_db["saldo"])
         novo_saldo = float(dados.saldo)
+
+        # Se o Admin mudar o telefone (ex: corrigindo um erro de digitação), o número
+        # deixa de ser o mesmo que foi verificado no WhatsApp — exige nova verificação.
+        telefone_mudou = dados.telefone != usuario_db["telefone"]
 
         # Inteligência financeira: injeta a transação se houve mudança no saldo
         if saldo_atual != novo_saldo:
@@ -593,10 +599,16 @@ def editar_usuario(
                 (usuario_id, tipo_transacao, abs(diferenca), motivo),
             )
 
-        cursor.execute(
-            "UPDATE utilizadores SET nome = %s, email = %s, telefone = %s, saldo = %s WHERE id = %s",
-            (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id),
-        )
+        if telefone_mudou:
+            cursor.execute(
+                "UPDATE utilizadores SET nome = %s, email = %s, telefone = %s, saldo = %s, whatsapp_verificado = FALSE WHERE id = %s",
+                (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id),
+            )
+        else:
+            cursor.execute(
+                "UPDATE utilizadores SET nome = %s, email = %s, telefone = %s, saldo = %s WHERE id = %s",
+                (dados.nome, dados.email, dados.telefone, novo_saldo, usuario_id),
+            )
         conn.commit()
         return {"mensagem": "Cliente atualizado com sucesso!"}
     except Exception as e:

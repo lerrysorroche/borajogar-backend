@@ -25,6 +25,14 @@ def realizar_locacao(locacao: NovaLocacao):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute(
+            "SELECT whatsapp_verificado FROM utilizadores WHERE id = %s",
+            (locacao.utilizador_id,),
+        )
+        checagem = cursor.fetchone()
+        if not checagem or not checagem["whatsapp_verificado"]:
+            raise HTTPException(status_code=403, detail="whatsapp_nao_verificado")
+
+        cursor.execute(
             "SELECT titulo, preco_aluguel, preco_aluguel_14, preco_secundaria, preco_secundaria_14 FROM jogos WHERE id = %s",
             (locacao.jogo_id,),
         )
@@ -268,6 +276,14 @@ def entrar_fila(reserva: NovaReserva):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        cursor.execute(
+            "SELECT whatsapp_verificado FROM utilizadores WHERE id = %s",
+            (reserva.utilizador_id,),
+        )
+        checagem = cursor.fetchone()
+        if not checagem or not checagem["whatsapp_verificado"]:
+            raise HTTPException(status_code=403, detail="whatsapp_nao_verificado")
+
         # 1. Verifica se já está na fila
         cursor.execute(
             "SELECT id FROM fila_espera WHERE utilizador_id = %s AND jogo_id = %s AND tipo_slot = %s AND status = 'AGUARDANDO'",
