@@ -8,7 +8,7 @@ import urllib.request
 from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg2.extras import RealDictCursor
 
-from auth import verificar_admin
+from auth import verificar_admin, verificar_usuario
 from database import get_db_connection
 from models import AtualizarTelefoneRequest, VerificarWhatsAdminRequest
 
@@ -240,12 +240,17 @@ async def receber_webhook_whatsapp(request: Request):
 
 
 @router.put("/usuarios/{usuario_id}/telefone")
-def atualizar_telefone(usuario_id: int, dados: AtualizarTelefoneRequest):
+def atualizar_telefone(
+    usuario_id: int,
+    dados: AtualizarTelefoneRequest,
+    usuario=Depends(verificar_usuario),
+):
     """
     [U] Cliente define/corrige o próprio número antes de verificar.
     Depois que whatsapp_verificado vira TRUE, esta rota passa a recusar a troca
     para sempre (trava orgânica, sem depender de contar "tentativas").
     """
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -278,9 +283,10 @@ def atualizar_telefone(usuario_id: int, dados: AtualizarTelefoneRequest):
 
 
 @router.get("/usuarios/{usuario_id}/status-whatsapp")
-def status_whatsapp(usuario_id: int):
+def status_whatsapp(usuario_id: int, usuario=Depends(verificar_usuario)):
     """[R] Rota leve usada pelo React em polling, igual ao status do PIX, para
     detectar em tempo real quando o webhook confirmar o número."""
+    usuario_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:

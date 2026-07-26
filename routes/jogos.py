@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 from database import get_db_connection
-from auth import verificar_admin
+from auth import verificar_admin, verificar_usuario
 from models import JogoNovo, EditarJogoRequest, VotoEnquete, NovaOpcaoEnquete
 import textwrap
 import io
@@ -303,12 +303,16 @@ def buscar_enquete(usuario_id: int = 0):
 
 
 @router.post("/enquete/votar")
-def votar_enquete(voto: VotoEnquete):
+def votar_enquete(voto: VotoEnquete, usuario=Depends(verificar_usuario)):
     """
     [C/U] Computa o voto do cliente.
     O UPSERT (ON CONFLICT DO UPDATE) garante que se o cliente votar de novo,
     ele altera o voto antigo ao invés de computar dois votos para o mesmo cliente.
+
+    O id sai do token: sem isso bastava variar o utilizador_id do corpo para
+    encher a enquete de votos em nome de clientes reais.
     """
+    voto.utilizador_id = usuario["id"]
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
