@@ -599,3 +599,119 @@ def admin_cancelar_reserva(reserva_id: int, admin_data=Depends(verificar_admin))
     finally:
         cursor.close()
         conn.close()
+
+
+# ==============================================================================
+# DOSSIÊ FINANCEIRO DO CLIENTE
+# ==============================================================================
+
+
+@router.get("/clientes/{usuario_id}/dossie")
+def dossie_cliente(usuario_id: int, admin_data=Depends(verificar_admin)):
+    """
+    [R] Retrato completo de um cliente para o Painel Admin.
+
+    Junta num só lugar o que antes só dava para ver abrindo o banco de dados na
+    mão: extrato, histórico de locações, fila e — o mais importante — os pedidos
+    de recarga que ficaram presos em PENDENTE.
+
+    O bloco 'resumo' existe para conferência rápida de caixa: se o número de
+    recargas não bate com o que entrou na conta bancária, dá para ver aqui sem
+    precisar somar o extrato linha a linha.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute(
+            """
+            SELECT id, nome, email, telefone, saldo, rank, is_admin,
+                   email_verificado, whatsapp_verificado, codigo_indicacao
+            FROM utilizadores WHERE id = %s
+            """,
+            (usuario_id,),
+        )
+        cliente = cursor.fetchone()
+        if not cliente:
+            raise HTTPException(status_code=404, detail="Cliente não encontrado.")
+        cliente["saldo"] = float(cliente["saldo"])
+
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' THEN valor END), 0) AS total_entradas,
+                COALESCE(SUM(CASE WHEN tipo = 'SAIDA'   THEN valor END), 0) AS total_saidas,
+                COALESCE(SUM(CASE WHEN descricao LIKE 'Recarga%%' THEN valor END), 0) AS total_recargas,
+                COUNT(*) FILTER (WHERE descricao LIKE 'Recarga%%') AS qtd_recargas
+            FROM transacoes WHERE utilizador_id = %s
+            """,
+            (usuario_id,),
+        )
+        resumo = {k: float(v) for k, v in cursor.fetchone().items()}
+        resumo["qtd_recargas"] = int(resumo["qtd_recargas"])
+
+        cursor.execute(
+            "SELECT tipo, valor, descricao, data_transacao FROM transacoes "
+            "WHERE utilizador_id = %s ORDER BY data_transacao DESC",
+            (usuario_id,),
+        )
+        transacoes = cursor.fetchall()
+        for t in transacoes:
+            t["valor"] = float(t["valor"])
+
+        cursor.execute(
+            """
+            SELECT l.id, j.titulo AS jogo, l.tipo_slot, l.data_fim, l.status,
+                   l.cashback_pendente, l.status_beneficio
+            FROM locacoes l
+            JOIN contas_psn c ON c.id = l.conta_psn_id
+            JOIN jogos j ON j.id = c.jogo_id
+            WHERE l.utilizador_id = %s
+            ORDER BY l.data_fim DESC
+            """,
+            (usuario_id,),
+        )
+        locacoes = cursor.fetchall()
+        for loc in locacoes:
+            loc["cashback_pendente"] = float(loc["cashback_pendente"] or 0)
+
+        # Recargas que nunca fecharam. Um pedido antigo preso aqui costuma ser
+        # pagamento que o cliente abandonou, mas também é onde apareceria um
+        # pagamento real que não virou saldo.
+        cursor.execute(
+            "SELECT id, valor_pago, valor_bonus, cupom, status FROM pedidos_pix "
+            "WHERE utilizador_id = %s AND status = 'PENDENTE'",
+            (usuario_id,),
+        )
+        pendentes = cursor.fetchall()
+        for pd in pendentes:
+            pd["valor_pago"] = float(pd["valor_pago"] or 0)
+            pd["valor_bonus"] = float(pd["valor_bonus"] or 0)
+
+        cursor.execute(
+            """
+            SELECT f.id, j.titulo AS jogo, f.tipo_slot, f.dias_aluguel,
+                   f.data_solicitacao, f.status
+            FROM fila_espera f
+            JOIN jogos j ON j.id = f.jogo_id
+            WHERE f.utilizador_id = %s AND f.status = 'AGUARDANDO'
+            ORDER BY f.data_solicitacao ASC
+            """,
+            (usuario_id,),
+        )
+        reservas = cursor.fetchall()
+
+        return {
+            "cliente": cliente,
+            "resumo": resumo,
+            "transacoes": transacoes,
+            "locacoes": locacoes,
+            "pedidos_pendentes": pendentes,
+            "reservas": reservas,
+        }
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
