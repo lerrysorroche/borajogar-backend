@@ -5,7 +5,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 
 from database import get_db_connection
-from routes import usuarios, jogos, pagamentos, alugueis, admin
+from routes import usuarios, jogos, pagamentos, alugueis, admin, whatsapp
 from routes.pagamentos import processar_sucesso_pagamento, credentials_efi
 from efipay import EfiPay
 
@@ -30,6 +30,7 @@ app.include_router(jogos.router)
 app.include_router(pagamentos.router)
 app.include_router(alugueis.router)
 app.include_router(admin.router)
+app.include_router(whatsapp.router)
 
 
 @app.get("/")
