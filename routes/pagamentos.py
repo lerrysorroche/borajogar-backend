@@ -94,68 +94,77 @@ def processar_sucesso_pagamento(
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cursor.execute("SELECT status FROM pedidos_pix WHERE id = %s", (payment_id,))
-        pedido = cursor.fetchone()
+        # CLAIM ATÔMICO (trava contra Double Spend):
+        # Esta única instrução é o que decide quem processa o pagamento. Como o
+        # WHERE exige status = 'PENDENTE', apenas o PRIMEIRO chamador consegue
+        # virar a linha; qualquer chamada concorrente (webhook + retorno do
+        # navegador + polling + cron disparam juntos) casa com 0 linhas e sai
+        # sem creditar nada.
+        # ATENÇÃO: não troque isto por um SELECT seguido de IF — o intervalo
+        # entre ler e trancar é justamente o que causava o crédito em dobro.
+        cursor.execute(
+            "UPDATE pedidos_pix SET status = 'CONCLUIDO' WHERE id = %s AND status = 'PENDENTE'",
+            (payment_id,),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return
 
-        # Só processa se estiver PENDENTE, evitando duplicidade (Double Spend)
-        if pedido and pedido["status"] == "PENDENTE":
+        cursor.execute(
+            "SELECT COUNT(*) as qtd FROM transacoes WHERE utilizador_id = %s AND descricao LIKE 'Recarga%%'",
+            (user_id,),
+        )
+        eh_primeira_recarga = cursor.fetchone()["qtd"] == 0
+        valor_total = valor_pago + valor_bonus
+
+        # 1. Adiciona o saldo principal (Recarga + Cupom)
+        cursor.execute(
+            "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s RETURNING nome, indicado_por",
+            (valor_total, user_id),
+        )
+        cliente = cursor.fetchone()
+
+        # Gera extrato da recarga
+        cursor.execute(
+            "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, 'Recarga de Carteira (Cartão/Pix)')",
+            (user_id, valor_pago),
+        )
+
+        # Gera extrato do bônus do cupom
+        if valor_bonus > 0:
             cursor.execute(
-                "SELECT COUNT(*) as qtd FROM transacoes WHERE utilizador_id = %s AND descricao LIKE 'Recarga%%'",
-                (user_id,),
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
+                (user_id, valor_bonus, f"🎟️ Bônus Cupom ({cupom_nome})"),
             )
-            eh_primeira_recarga = cursor.fetchone()["qtd"] == 0
-            valor_total = valor_pago + valor_bonus
-
-            # 1. Adiciona o saldo principal (Recarga + Cupom)
-            cursor.execute(
-                "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s RETURNING nome, indicado_por",
-                (valor_total, user_id),
-            )
-            cliente = cursor.fetchone()
-
-            # Gera extrato da recarga
-            cursor.execute(
-                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, 'Recarga de Carteira (Cartão/Pix)')",
-                (user_id, valor_pago),
-            )
-
-            # Gera extrato do bônus do cupom
-            if valor_bonus > 0:
+            cursor.execute("SELECT id FROM cupons WHERE codigo = %s", (cupom_nome,))
+            cupom_db = cursor.fetchone()
+            if cupom_db:
                 cursor.execute(
-                    "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
-                    (user_id, valor_bonus, f"🎟️ Bônus Cupom ({cupom_nome})"),
-                )
-                cursor.execute("SELECT id FROM cupons WHERE codigo = %s", (cupom_nome,))
-                cupom_db = cursor.fetchone()
-                if cupom_db:
-                    cursor.execute(
-                        "INSERT INTO cupons_usados (utilizador_id, cupom_id) VALUES (%s, %s)",
-                        (user_id, cupom_db["id"]),
-                    )
-
-            # 2. Lógica de Afiliados (Indique e Ganhe)
-            if eh_primeira_recarga and cliente["indicado_por"]:
-                id_amigo = cliente["indicado_por"]
-                valor_indicacao = valor_pago * 0.10
-                cursor.execute(
-                    "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s",
-                    (valor_indicacao, id_amigo),
-                )
-                cursor.execute(
-                    "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
-                    (
-                        id_amigo,
-                        valor_indicacao,
-                        f"🎁 Bônus de Indicação ({cliente['nome']})",
-                    ),
+                    "INSERT INTO cupons_usados (utilizador_id, cupom_id) VALUES (%s, %s)",
+                    (user_id, cupom_db["id"]),
                 )
 
-            # 3. Tranca o pedido para evitar que outro webhook processe de novo
+        # 2. Lógica de Afiliados (Indique e Ganhe)
+        if eh_primeira_recarga and cliente["indicado_por"]:
+            id_amigo = cliente["indicado_por"]
+            valor_indicacao = valor_pago * 0.10
             cursor.execute(
-                "UPDATE pedidos_pix SET status = 'CONCLUIDO' WHERE id = %s",
-                (payment_id,),
+                "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s",
+                (valor_indicacao, id_amigo),
             )
-            conn.commit()
+            cursor.execute(
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'ENTRADA', %s, %s)",
+                (
+                    id_amigo,
+                    valor_indicacao,
+                    f"🎁 Bônus de Indicação ({cliente['nome']})",
+                ),
+            )
+
+        # O claim do topo já marcou o pedido como CONCLUIDO. Commit fecha o
+        # claim e os créditos juntos: se algo falhar no meio, o rollback
+        # devolve o pedido para PENDENTE e ele pode ser reprocessado.
+        conn.commit()
     except Exception as e:
         conn.rollback()
         print(f"Erro Pagamento DB: {e}")

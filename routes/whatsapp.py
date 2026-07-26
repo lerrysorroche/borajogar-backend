@@ -55,21 +55,16 @@ def telefones_equivalentes(numero_a: str, numero_b: str) -> bool:
     )
 
 
-def enviar_mensagem_whatsapp(numero_destino: str, texto: str):
+def _post_whatsapp_api(payload: dict):
     """
-    Dispara uma mensagem de texto via WhatsApp Cloud API. Roda de forma silenciosa
-    (fire-and-forget) igual ao disparar_email_confirmacao, pra nunca travar o webhook.
+    Chamada de baixo nível pra API de mensagens da Cloud API. Roda de forma
+    silenciosa (fire-and-forget) igual ao disparar_email_confirmacao, pra nunca
+    travar quem chamou (webhook ou cron jobs).
     """
     try:
         if not (META_WHATSAPP_TOKEN and META_PHONE_NUMBER_ID):
             return
         url = f"https://graph.facebook.com/v20.0/{META_PHONE_NUMBER_ID}/messages"
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": numero_destino,
-            "type": "text",
-            "text": {"body": texto},
-        }
         req_http = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -82,7 +77,52 @@ def enviar_mensagem_whatsapp(numero_destino: str, texto: str):
         with urllib.request.urlopen(req_http) as response:
             pass
     except Exception as e:
-        print(f"Aviso: Falha ao enviar mensagem de confirmação no WhatsApp: {e}")
+        print(f"Aviso: Falha ao enviar mensagem no WhatsApp: {e}")
+
+
+def enviar_mensagem_whatsapp(numero_destino: str, texto: str):
+    """
+    Dispara uma mensagem de texto livre via WhatsApp Cloud API. Só funciona
+    dentro da janela de 24h de uma conversa iniciada pelo cliente (ex: resposta
+    à mensagem de verificação) — pra mensagens que a loja inicia, use
+    enviar_template_whatsapp.
+    """
+    _post_whatsapp_api(
+        {
+            "messaging_product": "whatsapp",
+            "to": numero_destino,
+            "type": "text",
+            "text": {"body": texto},
+        }
+    )
+
+
+def enviar_template_whatsapp(
+    numero_destino: str, nome_template: str, parametros: list, idioma: str = "pt_BR"
+):
+    """
+    Dispara uma mensagem via Message Template aprovado pela Meta. Necessário
+    pra qualquer mensagem que a loja inicia (fila liberada, lembrete de
+    devolução, etc.), já que essas não são resposta a algo que o cliente
+    mandou nas últimas 24h.
+    """
+    _post_whatsapp_api(
+        {
+            "messaging_product": "whatsapp",
+            "to": numero_destino,
+            "type": "template",
+            "template": {
+                "name": nome_template,
+                "language": {"code": idioma},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": p} for p in parametros],
+                    }
+                ],
+            },
+        }
+    )
 
 
 # ==============================================================================

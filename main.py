@@ -5,8 +5,10 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 
 from database import get_db_connection
+from notificacoes import enviar_email
 from routes import usuarios, jogos, pagamentos, alugueis, admin, whatsapp
 from routes.pagamentos import processar_sucesso_pagamento, credentials_efi
+from routes.whatsapp import enviar_template_whatsapp, normalizar_telefone
 from efipay import EfiPay
 
 app = FastAPI(title="API Locadora PS5")
@@ -105,6 +107,58 @@ def verificar_alugueis_vencidos():
         conn.close()
 
 
+def enviar_lembretes_devolucao():
+    """
+    Cron Job (A cada 15 minutos):
+    Avisa por e-mail e WhatsApp os clientes cujo aluguel vence nas próximas 12h,
+    lembrando de clicar em 'Devolver' pra garantir o Cashback e o Rank antes que
+    o cron de vencidos derrube a conta automaticamente.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute(
+            """
+            SELECT l.id, u.nome, u.email, u.telefone, j.titulo
+            FROM locacoes l
+            JOIN utilizadores u ON u.id = l.utilizador_id
+            JOIN contas_psn c ON c.id = l.conta_psn_id
+            JOIN jogos j ON j.id = c.jogo_id
+            WHERE l.status = 'ATIVA'
+              AND l.lembrete_devolucao_enviado = FALSE
+              AND l.data_fim BETWEEN CURRENT_TIMESTAMP AND CURRENT_TIMESTAMP + INTERVAL '12 hours'
+            """
+        )
+        pendentes = cursor.fetchall()
+
+        for loc in pendentes:
+            if loc.get("email"):
+                enviar_email(
+                    loc["email"],
+                    "⏰ Seu aluguel na Bora Jogar vence em breve!",
+                    f"<p>Fala, {loc['nome']}! Faltam 12h pro fim do seu aluguel de <strong>{loc['titulo']}</strong>. "
+                    "Não esqueça de clicar em 'Devolver' na aba 'Meus Acessos' pra garantir seu Cashback e subir de Rank!</p>",
+                )
+            if loc.get("telefone"):
+                enviar_template_whatsapp(
+                    normalizar_telefone(loc["telefone"]),
+                    "aluguel_devolucao",
+                    [loc["nome"], loc["titulo"]],
+                )
+
+            cursor.execute(
+                "UPDATE locacoes SET lembrete_devolucao_enviado = TRUE WHERE id = %s",
+                (loc["id"],),
+            )
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro no Cron de Lembretes de Devolução: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def processar_filas_automaticamente():
     """
     Cron Job (A cada 1 minuto):
@@ -160,7 +214,7 @@ def processar_filas_automaticamente():
                     else "data_solicitacao ASC LIMIT 1"
                 )
 
-                query_proximo = f"SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s ORDER BY {ordem}"
+                query_proximo = f"SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY {ordem}"
 
                 cursor.execute(query_proximo, (jogo_id, tipo_slot))
                 proximo = cursor.fetchone()
@@ -190,6 +244,19 @@ def processar_filas_automaticamente():
                         (proximo["utilizador_id"], proximo["id"], titulo, msg),
                     )
                     conn.commit()
+
+                    if proximo.get("email"):
+                        enviar_email(
+                            proximo["email"],
+                            "🎮 Seu jogo já está liberado na Bora Jogar!",
+                            f"<p>Fala, {proximo['nome']}! Sua vez chegou: o jogo <strong>{titulo}</strong> já está liberado na sua conta. Acesse a aba 'Meus Acessos' no site pra pegar os dados de acesso.</p>",
+                        )
+                    if proximo.get("telefone"):
+                        enviar_template_whatsapp(
+                            normalizar_telefone(proximo["telefone"]),
+                            "jogo_pronto",
+                            [proximo["nome"], titulo],
+                        )
                 else:
                     break
     except Exception as e:
@@ -296,6 +363,7 @@ def iniciar_servicos():
     scheduler.add_job(verificar_alugueis_vencidos, "interval", minutes=1)
     scheduler.add_job(processar_filas_automaticamente, "interval", minutes=1)
     scheduler.add_job(verificar_pix_perdidos, "interval", minutes=1)
+    scheduler.add_job(enviar_lembretes_devolucao, "interval", minutes=15)
 
     # NOVO: Faxina de cupons rodando todo dia às 23:59
     scheduler.add_job(limpar_cupons_surpresa_cron, "cron", hour=23, minute=59)
