@@ -31,6 +31,30 @@ def normalizar_telefone(numero: str) -> str:
     return digitos
 
 
+def _variantes_telefone(numero_normalizado: str) -> set:
+    """
+    Gera as variantes com e sem o 9º dígito de um número normalizado (55 + DDD + local).
+    Necessário porque o número que o cliente digita no site nem sempre bate,
+    dígito a dígito, com o que a Meta manda no campo 'from' do webhook: alguns
+    operadores/números brasileiros omitem o 9 extra depois do DDD.
+    """
+    corpo = numero_normalizado[4:]
+    variantes = {numero_normalizado}
+    if len(corpo) == 9 and corpo.startswith("9"):
+        variantes.add(numero_normalizado[:4] + corpo[1:])
+    elif len(corpo) == 8:
+        variantes.add(numero_normalizado[:4] + "9" + corpo)
+    return variantes
+
+
+def telefones_equivalentes(numero_a: str, numero_b: str) -> bool:
+    """Compara dois telefones tolerando a ambiguidade do 9º dígito brasileiro."""
+    return bool(
+        _variantes_telefone(normalizar_telefone(numero_a))
+        & _variantes_telefone(normalizar_telefone(numero_b))
+    )
+
+
 def enviar_mensagem_whatsapp(numero_destino: str, texto: str):
     """
     Dispara uma mensagem de texto via WhatsApp Cloud API. Roda de forma silenciosa
@@ -114,14 +138,17 @@ async def receber_webhook_whatsapp(request: Request):
 
     if not mensagens:
         # Outros eventos da Meta (confirmação de entrega, leitura, etc.) não nos interessam.
+        print("Webhook WhatsApp: payload sem 'messages' (provavelmente status de entrega).")
         return {"status": "ignorado"}
 
     msg = mensagens[0]
     numero_remetente = msg.get("from", "")
     texto_mensagem = msg.get("text", {}).get("body", "")
+    print(f"Webhook WhatsApp: mensagem recebida de {numero_remetente}: {texto_mensagem!r}")
 
     match = re.search(r"#(\d+)", texto_mensagem)
     if not match:
+        print("Webhook WhatsApp: código #id não encontrado no texto da mensagem.")
         return {"status": "sem_codigo"}
 
     utilizador_id = int(match.group(1))
@@ -136,10 +163,15 @@ async def receber_webhook_whatsapp(request: Request):
         usuario = cursor.fetchone()
 
         if not usuario or usuario["whatsapp_verificado"]:
+            print(f"Webhook WhatsApp: usuario {utilizador_id} inexistente ou já verificado.")
             return {"status": "ignorado"}
 
-        if normalizar_telefone(usuario["telefone"]) != normalizar_telefone(numero_remetente):
+        if not telefones_equivalentes(usuario["telefone"], numero_remetente):
             # O código bateu mas veio de um número diferente do cadastrado: não verifica.
+            print(
+                f"Webhook WhatsApp: número não confere para usuario {utilizador_id}. "
+                f"Cadastrado={usuario['telefone']!r} Remetente={numero_remetente!r}"
+            )
             return {"status": "numero_nao_confere"}
 
         cursor.execute(
