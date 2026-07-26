@@ -198,10 +198,9 @@ def processar_filas_automaticamente():
             FROM fila_espera f
             JOIN jogos j ON f.jogo_id = j.id
             JOIN contas_psn c ON c.jogo_id = j.id
-            WHERE f.status = 'AGUARDANDO' 
+            WHERE f.status = 'AGUARDANDO'
             AND (
-                j.data_lancamento IS NULL 
-                OR j.data_lancamento = '' 
+                j.data_lancamento IS NULL
                 OR CAST(j.data_lancamento AS VARCHAR) <= TO_CHAR(CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')
             )
             AND (
