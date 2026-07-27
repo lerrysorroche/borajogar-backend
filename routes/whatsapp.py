@@ -163,7 +163,10 @@ async def receber_webhook_whatsapp(request: Request):
     if META_APP_SECRET:
         assinatura = request.headers.get("x-hub-signature-256", "")
         assinatura_esperada = (
-            "sha256=" + hmac.new(META_APP_SECRET.encode(), corpo_bruto, hashlib.sha256).hexdigest()
+            "sha256="
+            + hmac.new(
+                META_APP_SECRET.encode(), corpo_bruto, hashlib.sha256
+            ).hexdigest()
         )
         if not hmac.compare_digest(assinatura, assinatura_esperada):
             raise HTTPException(status_code=403, detail="Assinatura inválida.")
@@ -178,13 +181,17 @@ async def receber_webhook_whatsapp(request: Request):
 
     if not mensagens:
         # Outros eventos da Meta (confirmação de entrega, leitura, etc.) não nos interessam.
-        print("Webhook WhatsApp: payload sem 'messages' (provavelmente status de entrega).")
+        print(
+            "Webhook WhatsApp: payload sem 'messages' (provavelmente status de entrega)."
+        )
         return {"status": "ignorado"}
 
     msg = mensagens[0]
     numero_remetente = msg.get("from", "")
     texto_mensagem = msg.get("text", {}).get("body", "")
-    print(f"Webhook WhatsApp: mensagem recebida de {numero_remetente}: {texto_mensagem!r}")
+    print(
+        f"Webhook WhatsApp: mensagem recebida de {numero_remetente}: {texto_mensagem!r}"
+    )
 
     match = re.search(r"#(\d+)", texto_mensagem)
     if not match:
@@ -203,7 +210,9 @@ async def receber_webhook_whatsapp(request: Request):
         usuario = cursor.fetchone()
 
         if not usuario or usuario["whatsapp_verificado"]:
-            print(f"Webhook WhatsApp: usuario {utilizador_id} inexistente ou já verificado.")
+            print(
+                f"Webhook WhatsApp: usuario {utilizador_id} inexistente ou já verificado."
+            )
             return {"status": "ignorado"}
 
         if not telefones_equivalentes(usuario["telefone"], numero_remetente):
@@ -271,7 +280,9 @@ def atualizar_telefone(
             (dados.telefone, usuario_id),
         )
         conn.commit()
-        return {"mensagem": "Telefone atualizado! Agora envie a mensagem de verificação no WhatsApp."}
+        return {
+            "mensagem": "Telefone atualizado! Agora envie a mensagem de verificação no WhatsApp."
+        }
     except Exception as e:
         conn.rollback()
         if isinstance(e, HTTPException):

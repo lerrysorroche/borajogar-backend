@@ -607,7 +607,12 @@ def admin_cancelar_reserva(reserva_id: int, admin_data=Depends(verificar_admin))
 
 
 @router.get("/clientes/{usuario_id}/dossie")
-def dossie_cliente(usuario_id: int, admin_data=Depends(verificar_admin)):
+def dossie_cliente(
+    usuario_id: int,
+    limite_transacoes: int = 10,
+    limite_locacoes: int = 10,
+    admin_data=Depends(verificar_admin),
+):
     """
     [R] Retrato completo de um cliente para o Painel Admin.
 
@@ -617,8 +622,15 @@ def dossie_cliente(usuario_id: int, admin_data=Depends(verificar_admin)):
 
     O bloco 'resumo' existe para conferência rápida de caixa: se o número de
     recargas não bate com o que entrou na conta bancária, dá para ver aqui sem
-    precisar somar o extrato linha a linha.
+    precisar somar o extrato linha a linha. Esse cálculo roda sobre o histórico
+    inteiro, sem limite — só a LISTA de transações/locações é paginada, para não
+    travar o Painel num cliente antigo com centenas de registros.
     """
+    # Limites de sanidade: cliente que faz gerenciamento nunca precisa de mais
+    # que isso de uma vez, e evita alguém montar ?limite_transacoes=999999.
+    limite_transacoes = max(1, min(limite_transacoes, 500))
+    limite_locacoes = max(1, min(limite_locacoes, 500))
+
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -650,14 +662,26 @@ def dossie_cliente(usuario_id: int, admin_data=Depends(verificar_admin)):
         resumo["qtd_recargas"] = int(resumo["qtd_recargas"])
 
         cursor.execute(
-            "SELECT tipo, valor, descricao, data_transacao FROM transacoes "
-            "WHERE utilizador_id = %s ORDER BY data_transacao DESC",
+            "SELECT COUNT(*) AS total FROM transacoes WHERE utilizador_id = %s",
             (usuario_id,),
+        )
+        transacoes_total = cursor.fetchone()["total"]
+        cursor.execute(
+            "SELECT tipo, valor, descricao, data_transacao FROM transacoes "
+            "WHERE utilizador_id = %s ORDER BY data_transacao DESC LIMIT %s",
+            (usuario_id, limite_transacoes),
         )
         transacoes = cursor.fetchall()
         for t in transacoes:
             t["valor"] = float(t["valor"])
 
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS total FROM locacoes WHERE utilizador_id = %s
+            """,
+            (usuario_id,),
+        )
+        locacoes_total = cursor.fetchone()["total"]
         cursor.execute(
             """
             SELECT l.id, j.titulo AS jogo, l.tipo_slot, l.data_fim, l.status,
@@ -667,8 +691,9 @@ def dossie_cliente(usuario_id: int, admin_data=Depends(verificar_admin)):
             JOIN jogos j ON j.id = c.jogo_id
             WHERE l.utilizador_id = %s
             ORDER BY l.data_fim DESC
+            LIMIT %s
             """,
-            (usuario_id,),
+            (usuario_id, limite_locacoes),
         )
         locacoes = cursor.fetchall()
         for loc in locacoes:
@@ -677,9 +702,15 @@ def dossie_cliente(usuario_id: int, admin_data=Depends(verificar_admin)):
         # Recargas que nunca fecharam. Um pedido antigo preso aqui costuma ser
         # pagamento que o cliente abandonou, mas também é onde apareceria um
         # pagamento real que não virou saldo.
+        # Restrito ao mês atual: o cron 'verificar_pix_perdidos' expira
+        # automaticamente qualquer PENDENTE com mais de 48h, então nada deveria
+        # sobreviver até aqui de qualquer forma — isto é a rede de segurança
+        # para a janela entre um deploy e outro.
         cursor.execute(
-            "SELECT id, valor_pago, valor_bonus, cupom, status FROM pedidos_pix "
-            "WHERE utilizador_id = %s AND status = 'PENDENTE'",
+            "SELECT id, valor_pago, valor_bonus, cupom, status, data_criacao FROM pedidos_pix "
+            "WHERE utilizador_id = %s AND status = 'PENDENTE' "
+            "AND data_criacao >= date_trunc('month', CURRENT_TIMESTAMP) "
+            "ORDER BY data_criacao DESC",
             (usuario_id,),
         )
         pendentes = cursor.fetchall()
@@ -704,7 +735,9 @@ def dossie_cliente(usuario_id: int, admin_data=Depends(verificar_admin)):
             "cliente": cliente,
             "resumo": resumo,
             "transacoes": transacoes,
+            "transacoes_total": transacoes_total,
             "locacoes": locacoes,
+            "locacoes_total": locacoes_total,
             "pedidos_pendentes": pendentes,
             "reservas": reservas,
         }
