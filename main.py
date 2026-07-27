@@ -2,7 +2,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 from auth import verificar_admin
@@ -138,8 +138,7 @@ def enviar_lembretes_devolucao():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cursor.execute(
-            """
+        cursor.execute("""
             SELECT l.id, u.nome, u.email, u.telefone, j.titulo
             FROM locacoes l
             JOIN utilizadores u ON u.id = l.utilizador_id
@@ -148,8 +147,7 @@ def enviar_lembretes_devolucao():
             WHERE l.status = 'ATIVA'
               AND l.lembrete_devolucao_enviado = FALSE
               AND l.data_fim BETWEEN CURRENT_TIMESTAMP AND CURRENT_TIMESTAMP + INTERVAL '12 hours'
-            """
-        )
+            """)
         pendentes = cursor.fetchall()
 
         for loc in pendentes:
@@ -298,10 +296,22 @@ def verificar_pix_perdidos():
     navegador — mas o dinheiro cai aqui em no máximo 1 minuto de qualquer jeito.
     Por isso passou a cobrir também as sessões da Stripe ('cs_...'), que antes
     eram puladas e só tinham o webhook como caminho.
+
+    Antes de checar qualquer coisa na Efí/Stripe, expira em lote quem já passou
+    da margem segura (Pix expira em 1h, sessão da Stripe em 24h — 48h cobre os
+    dois com folga). Sem isso, um checkout abandonado vira uma chamada de rede
+    por minuto para sempre; com isso, o pendente sai de cena sozinho e some
+    também da lista de "Recargas Não Confirmadas" no Painel Admin.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        cursor.execute(
+            "UPDATE pedidos_pix SET status = 'EXPIRADO' "
+            "WHERE status = 'PENDENTE' AND data_criacao < CURRENT_TIMESTAMP - INTERVAL '48 hours'"
+        )
+        conn.commit()
+
         cursor.execute(
             "SELECT id, utilizador_id, valor_pago, valor_bonus, cupom FROM pedidos_pix WHERE status = 'PENDENTE'"
         )
