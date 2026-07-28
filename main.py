@@ -183,18 +183,17 @@ def enviar_lembretes_devolucao():
 def processar_filas_automaticamente():
     """
     Cron Job (A cada 1 minuto):
-    O 'Maestro' da fila de espera.
-    [ATUALIZADO]: Agora usa a nova coluna de 'rank' para furar fila no dia do lançamento.
+    O 'Maestro' da fila de espera. Entrega estritamente por ordem de chegada
+    (sem exceção para pré-venda — o antigo furo de fila por rank foi removido).
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("""
-            SELECT DISTINCT 
-                f.jogo_id, 
-                j.titulo, 
-                f.tipo_slot,
-                CASE WHEN CAST(j.data_lancamento AS VARCHAR) = TO_CHAR(CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') THEN True ELSE False END as is_dia_lancamento
+            SELECT DISTINCT
+                f.jogo_id,
+                j.titulo,
+                f.tipo_slot
             FROM fila_espera f
             JOIN jogos j ON f.jogo_id = j.id
             JOIN contas_psn c ON c.jogo_id = j.id
@@ -214,7 +213,6 @@ def processar_filas_automaticamente():
             jogo_id = jp["jogo_id"]
             titulo = jp["titulo"]
             tipo_slot = jp["tipo_slot"]
-            is_dia_lancamento = jp["is_dia_lancamento"]
 
             coluna_status = (
                 "status_primaria" if tipo_slot == "PRIMARIA" else "status_secundaria"
@@ -227,14 +225,7 @@ def processar_filas_automaticamente():
             contas_disponiveis = cursor.fetchall()
 
             for conta in contas_disponiveis:
-                # NOVO: A ordem agora usa o "rank" do utilizador em vez de COUNT de locações
-                ordem = (
-                    "(SELECT rank FROM utilizadores WHERE id = fila_espera.utilizador_id) DESC, data_solicitacao ASC LIMIT 1"
-                    if is_dia_lancamento
-                    else "data_solicitacao ASC LIMIT 1"
-                )
-
-                query_proximo = f"SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY {ordem}"
+                query_proximo = "SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY data_solicitacao ASC LIMIT 1"
 
                 cursor.execute(query_proximo, (jogo_id, tipo_slot))
                 proximo = cursor.fetchone()

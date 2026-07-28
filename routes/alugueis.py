@@ -380,60 +380,6 @@ def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
             ),
         )
 
-        # ==============================================================================
-        # 6. Lógica de Rank VIP (Aplica apenas dentro do mesmo tipo de Slot)
-        # ==============================================================================
-        hoje_str = datetime.now().strftime("%Y-%m-%d")
-        eh_pre_venda = (
-            jogo_info["data_lancamento"]
-            and str(jogo_info["data_lancamento"]) >= hoje_str
-        )
-
-        if eh_pre_venda:
-            # Puxa a data limite
-            cursor.execute(
-                "SELECT data_lancamento, (SELECT MIN(data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = %s AND l.status = 'ATIVA' AND l.tipo_slot = %s) as prox FROM jogos WHERE id = %s",
-                (reserva.jogo_id, reserva.tipo_slot, reserva.jogo_id),
-            )
-            jogo_meta = cursor.fetchone()
-
-            base_date = datetime.now()
-            if jogo_meta["data_lancamento"]:
-                dl = datetime.combine(jogo_meta["data_lancamento"], datetime.min.time())
-                if dl > base_date:
-                    base_date = dl
-            if jogo_meta["prox"] and jogo_meta["prox"] > base_date:
-                base_date = jogo_meta["prox"]
-
-            # NOVIDADE: A query que detecta quem foi ultrapassado agora compara o 'rank' direto!
-            cursor.execute(
-                """
-                SELECT f.id, f.utilizador_id,
-                (SELECT COALESCE(SUM(dias_aluguel), 0) FROM fila_espera f2 WHERE f2.jogo_id = f.jogo_id AND f2.status = 'AGUARDANDO' AND f2.tipo_slot = f.tipo_slot AND f2.data_solicitacao < f.data_solicitacao AND f2.id != %s) as dias_frente_antes
-                FROM fila_espera f 
-                WHERE f.jogo_id = %s AND f.status = 'AGUARDANDO' AND f.tipo_slot = %s AND f.utilizador_id != %s
-                AND (SELECT rank FROM utilizadores WHERE id = f.utilizador_id) < %s
-                """,
-                (
-                    reserva_id,
-                    reserva.jogo_id,
-                    reserva.tipo_slot,
-                    reserva.utilizador_id,
-                    rank_atual,
-                ),
-            )
-            bumped = cursor.fetchall()
-
-            # Avisa os clientes que foram ultrapassados na fila pelo sistema VIP
-            for b in bumped:
-                data_antiga = base_date + timedelta(days=b["dias_frente_antes"])
-                data_nova = data_antiga + timedelta(days=reserva.dias_aluguel)
-                msg = f"Devido à prioridade de Rank VIP, a previsão da sua Fila ({reserva.tipo_slot}) do jogo {jogo_info['titulo']} mudou para {data_nova.strftime('%d/%m/%Y')}."
-                cursor.execute(
-                    "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
-                    (b["utilizador_id"], b["id"], jogo_info["titulo"], msg),
-                )
-
         conn.commit()
         return {
             "mensagem": f"Você entrou na Fila ({reserva.tipo_slot}) com Desconto VIP aplicado!"
@@ -527,33 +473,11 @@ def buscar_reservas_usuario(usuario_id: int, usuario=Depends(verificar_usuario))
     reservas = cursor.fetchall()
 
     for r in reservas:
-        hoje_str = datetime.now().strftime("%Y-%m-%d")
-        eh_pre_venda = r["data_lancamento"] and str(r["data_lancamento"]) >= hoje_str
-
-        if eh_pre_venda:
-            cursor.execute(
-                """
-                SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
-                WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s AND (
-                    (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') > 
-                    (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA')
-                    OR ((SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') = 
-                     (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA') AND data_solicitacao < %s)
-                )
-            """,
-                (
-                    r["jogo_id"],
-                    r["tipo_slot"],
-                    usuario_id,
-                    usuario_id,
-                    r["data_solicitacao"],
-                ),
-            )
-        else:
-            cursor.execute(
-                "SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera WHERE jogo_id = %s AND tipo_slot = %s AND status = 'AGUARDANDO' AND data_solicitacao < %s",
-                (r["jogo_id"], r["tipo_slot"], r["data_solicitacao"]),
-            )
+        # Fila estritamente por ordem de chegada (sem exceção para pré-venda).
+        cursor.execute(
+            "SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera WHERE jogo_id = %s AND tipo_slot = %s AND status = 'AGUARDANDO' AND data_solicitacao < %s",
+            (r["jogo_id"], r["tipo_slot"], r["data_solicitacao"]),
+        )
 
         dias_frente = cursor.fetchone()["dias_frente"]
         base_date = datetime.now()
