@@ -249,24 +249,14 @@ def liberar_conta_manutencao(
                 (ultima_loc["id"],),
             )
 
-        # Confere se é um lançamento, para saber se a fila respeita RANK VIP ou apenas Data.
-        cursor.execute("SELECT titulo, data_lancamento FROM jogos WHERE id = %s", (jogo_id,))
-        jogo_info = cursor.fetchone()
-        titulo = jogo_info["titulo"]
-        data_lanc = jogo_info["data_lancamento"]
-        eh_pre_venda = data_lanc and str(data_lanc) >= datetime.now().strftime(
-            "%Y-%m-%d"
-        )
+        cursor.execute("SELECT titulo FROM jogos WHERE id = %s", (jogo_id,))
+        titulo = cursor.fetchone()["titulo"]
 
-        query_fila = """SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY {} data_solicitacao ASC LIMIT 1"""
-        ordem = (
-            "(SELECT rank FROM utilizadores WHERE id = fila_espera.utilizador_id) DESC,"
-            if eh_pre_venda
-            else ""
+        # Puxa o próximo da fila específica daquele slot, estritamente por ordem de chegada.
+        cursor.execute(
+            "SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY data_solicitacao ASC LIMIT 1",
+            (jogo_id, slot_em_manutencao),
         )
-
-        # Puxa o próximo da fila específica daquele slot
-        cursor.execute(query_fila.format(ordem), (jogo_id, slot_em_manutencao))
         proximo = cursor.fetchone()
 
         if proximo:
@@ -530,35 +520,11 @@ def listar_todas_reservas(admin_data=Depends(verificar_admin)):
     reservas = cursor.fetchall()
 
     for r in reservas:
-        hoje_str = datetime.now().strftime("%Y-%m-%d")
-        eh_pre_venda = r["data_lancamento"] and str(r["data_lancamento"]) >= hoje_str
-
-        if eh_pre_venda:
-            # A lógica VIP empurra os dias baseando-se apenas na fila do mesmo tipo de slot
-            cursor.execute(
-                """
-                SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera 
-                WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s AND (
-                    (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') > 
-                    (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA')
-                    OR ((SELECT COUNT(*) FROM locacoes WHERE utilizador_id = fila_espera.utilizador_id AND status = 'EXPIRADA') = 
-                     (SELECT COUNT(*) FROM locacoes WHERE utilizador_id = %s AND status = 'EXPIRADA') AND data_solicitacao < %s)
-                )
-            """,
-                (
-                    r["jogo_id"],
-                    r["tipo_slot"],
-                    r["utilizador_id"],
-                    r["utilizador_id"],
-                    r["data_solicitacao"],
-                ),
-            )
-        else:
-            # Se não é pré-venda, fila normal por data (mas isolada pelo slot)
-            cursor.execute(
-                "SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera WHERE jogo_id = %s AND tipo_slot = %s AND status = 'AGUARDANDO' AND data_solicitacao < %s",
-                (r["jogo_id"], r["tipo_slot"], r["data_solicitacao"]),
-            )
+        # Fila normal por data de chegada, isolada pelo slot (sem exceção para pré-venda).
+        cursor.execute(
+            "SELECT COALESCE(SUM(dias_aluguel), 0) as dias_frente FROM fila_espera WHERE jogo_id = %s AND tipo_slot = %s AND status = 'AGUARDANDO' AND data_solicitacao < %s",
+            (r["jogo_id"], r["tipo_slot"], r["data_solicitacao"]),
+        )
 
         dias_frente = cursor.fetchone()["dias_frente"]
         base_date = datetime.now()
