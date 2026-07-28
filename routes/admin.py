@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 
 from database import get_db_connection
 from auth import verificar_admin
+from notificacoes import enviar_email
+from routes.whatsapp import enviar_template_whatsapp, normalizar_telefone
 from models import (
     EditarClienteRequest,
     ConfigRequest,
@@ -248,13 +250,15 @@ def liberar_conta_manutencao(
             )
 
         # Confere se é um lançamento, para saber se a fila respeita RANK VIP ou apenas Data.
-        cursor.execute("SELECT data_lancamento FROM jogos WHERE id = %s", (jogo_id,))
-        data_lanc = cursor.fetchone()["data_lancamento"]
+        cursor.execute("SELECT titulo, data_lancamento FROM jogos WHERE id = %s", (jogo_id,))
+        jogo_info = cursor.fetchone()
+        titulo = jogo_info["titulo"]
+        data_lanc = jogo_info["data_lancamento"]
         eh_pre_venda = data_lanc and str(data_lanc) >= datetime.now().strftime(
             "%Y-%m-%d"
         )
 
-        query_fila = """SELECT id, utilizador_id, dias_aluguel FROM fila_espera WHERE jogo_id = %s AND status = 'AGUARDANDO' AND tipo_slot = %s ORDER BY {} data_solicitacao ASC LIMIT 1"""
+        query_fila = """SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY {} data_solicitacao ASC LIMIT 1"""
         ordem = (
             "(SELECT rank FROM utilizadores WHERE id = fila_espera.utilizador_id) DESC,"
             if eh_pre_venda
@@ -284,6 +288,11 @@ def liberar_conta_manutencao(
                 f"UPDATE contas_psn SET {coluna_status} = 'ALUGADA' WHERE id = %s",
                 (dados.conta_psn_id,),
             )
+            mensagem_sino = f"🎉 SEU ACESSO FOI LIBERADO! A sua vaga ({slot_em_manutencao}) do jogo {titulo} já está na aba 'Meus Acessos'. Bom jogo!"
+            cursor.execute(
+                "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
+                (proximo["utilizador_id"], proximo["id"], titulo, mensagem_sino),
+            )
             msg = f"Senha alterada e Conta Auditada! A vaga {slot_em_manutencao} foi entregue para o próximo da fila."
         else:
             # Não tem fila: Apenas devolve o slot para a prateleira
@@ -294,6 +303,26 @@ def liberar_conta_manutencao(
             msg = f"Senha alterada e Conta Auditada! A vaga {slot_em_manutencao} agora está DISPONÍVEL."
 
         conn.commit()
+
+        # Este é o caminho REAL de entrega da fila (troca de senha manual, não o
+        # cron): devolução e revogação sempre passam a conta por MANUTENCAO antes,
+        # então é aqui — não em processar_filas_automaticamente — que o próximo da
+        # fila efetivamente recebe o jogo na maioria dos casos. Sem isto, sino,
+        # e-mail e WhatsApp nunca disparavam nesse fluxo.
+        if proximo:
+            if proximo.get("email"):
+                enviar_email(
+                    proximo["email"],
+                    "🎮 Seu jogo já está liberado na Bora Jogar!",
+                    f"<p>Fala, {proximo['nome']}! Sua vez chegou: o jogo <strong>{titulo}</strong> já está liberado na sua conta. Acesse a aba 'Meus Acessos' no site pra pegar os dados de acesso.</p>",
+                )
+            if proximo.get("telefone"):
+                enviar_template_whatsapp(
+                    normalizar_telefone(proximo["telefone"]),
+                    "jogo_pronto",
+                    [proximo["nome"], titulo],
+                )
+
         return {"mensagem": msg}
     except Exception as e:
         conn.rollback()

@@ -159,10 +159,12 @@ def enviar_lembretes_devolucao():
                     "Não esqueça de clicar em 'Devolver' na aba 'Meus Acessos' pra garantir seu Cashback e subir de Rank!</p>",
                 )
             if loc.get("telefone"):
+                # O template aprovado pela Meta ficou só com {{1}} = nome do jogo
+                # (a saudação com o nome do cliente caiu na revisão deles).
                 enviar_template_whatsapp(
                     normalizar_telefone(loc["telefone"]),
                     "aluguel_devolucao",
-                    [loc["nome"], loc["titulo"]],
+                    [loc["titulo"]],
                 )
 
             cursor.execute(
