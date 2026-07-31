@@ -37,7 +37,7 @@ def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
             raise HTTPException(status_code=403, detail="whatsapp_nao_verificado")
 
         cursor.execute(
-            "SELECT titulo, preco_aluguel, preco_aluguel_14, preco_secundaria, preco_secundaria_14 FROM jogos WHERE id = %s",
+            "SELECT titulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float FROM jogos WHERE id = %s",
             (locacao.jogo_id,),
         )
         jogo_info = cursor.fetchone()
@@ -316,7 +316,7 @@ def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
 
         # 2. Puxa os dados do jogo
         cursor.execute(
-            "SELECT titulo, preco_aluguel, preco_aluguel_14, preco_secundaria, preco_secundaria_14, data_lancamento FROM jogos WHERE id = %s",
+            "SELECT titulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float, data_lancamento FROM jogos WHERE id = %s",
             (reserva.jogo_id,),
         )
         jogo_info = cursor.fetchone()

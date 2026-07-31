@@ -270,7 +270,7 @@ def gerar_checkout_stripe(recarga: NovaRecarga, usuario=Depends(verificar_usuari
 
         if recarga.cupom:
             cursor.execute(
-                "SELECT id, tipo, valor FROM cupons WHERE codigo = %s AND ativo = TRUE",
+                "SELECT id, tipo, valor::float FROM cupons WHERE codigo = %s AND ativo = TRUE",
                 (cupom_nome,),
             )
             cupom = cursor.fetchone()
@@ -362,7 +362,7 @@ def gerar_pix_efi(recarga: NovaRecarga, usuario=Depends(verificar_usuario)):
 
         if recarga.cupom:
             cursor.execute(
-                "SELECT id, tipo, valor FROM cupons WHERE codigo = %s AND ativo = TRUE",
+                "SELECT id, tipo, valor::float FROM cupons WHERE codigo = %s AND ativo = TRUE",
                 (cupom_nome,),
             )
             cupom = cursor.fetchone()
