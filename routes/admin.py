@@ -327,7 +327,8 @@ def resetar_trava_2fa_admin(locacao_id: int, admin_data=Depends(verificar_admin)
     """
     [U] O Botão de Pânico "Zero Trust".
     Permite que o dono da locadora resete manualmente o bloqueio do 2FA para um cliente
-    da vaga Secundária que digitou o número errado no console e ficou "preso".
+    que digitou o número errado no console e ficou "preso" — vale pra Primária e
+    Secundária, já que as duas travam depois de gerar o código uma vez.
     """
     conn = get_db_connection()
     cursor = conn.cursor()

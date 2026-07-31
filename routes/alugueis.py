@@ -231,7 +231,8 @@ def gerar_codigo_2fa(
 ):
     """
     [R/U] O Autenticador.
-    Verifica se o cliente da vaga SECUNDÁRIA já apertou este botão alguma vez na vida.
+    Verifica se o cliente já apertou este botão alguma vez na vida, em
+    QUALQUER vaga (Primária ou Secundária — antes só travava a Secundária).
     Se sim, joga um Erro 403 e tranca a porta para evitar o "Golpe da Sony".
 
     O id sai do token: esta rota devolve o código 2FA vivo da conta PSN, e
@@ -253,11 +254,11 @@ def gerar_codigo_2fa(
                 status_code=404, detail="Conta sem 2FA ou acesso já expirado."
             )
 
-        # A Trava de Segurança
-        if resultado["tipo_slot"] == "SECUNDARIA" and resultado["codigo_2fa_usado"]:
+        # A Trava de Segurança (agora vale para as duas vagas, não só a Secundária)
+        if resultado["codigo_2fa_usado"]:
             raise HTTPException(
                 status_code=403,
-                detail="ALERTA: O código de acesso da vaga Secundária só pode ser gerado 1 ÚNICA VEZ. Caso tenha ocorrido um erro na digitação no seu videogame, acione o suporte.",
+                detail="ALERTA: O código de acesso 2FA só pode ser gerado 1 ÚNICA VEZ. Caso tenha ocorrido um erro na digitação no seu videogame, acione o suporte.",
             )
 
         # Queima o cartucho (Salva que ele apertou o botão)
