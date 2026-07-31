@@ -17,6 +17,7 @@ class UsuarioNovo(BaseModel):
     senha: str
     telefone: str
     codigo_indicacao: str = ""
+    quer_grupo_whatsapp: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -59,6 +60,7 @@ class GoogleLoginRequest(BaseModel):
     email: str
     nome: str
     telefone: str = ""
+    quer_grupo_whatsapp: bool = False
 
 
 class AtualizarTelefoneRequest(BaseModel):
@@ -289,3 +291,12 @@ class LerNotificacao(BaseModel):
     """Marca o aviso de mudança de datas na fila de espera como 'Lido'."""
 
     notificacao_id: int
+
+
+class BroadcastNotificacao(BaseModel):
+    """Painel Admin: dispara uma notificação avulsa (tipo customizável) para
+    todos os clientes cadastrados. Usado para avisar a base antiga sobre o
+    Grupo do WhatsApp, mas a mensagem é editável pelo admin antes do envio."""
+
+    mensagem: str
+    tipo: str = "GRUPO_WHATSAPP"
