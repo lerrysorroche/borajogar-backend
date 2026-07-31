@@ -13,6 +13,7 @@ from models import (
     AplicarMultaRequest,
     AjusteSaldoRequest,
     ResetSenhaRequest,
+    BroadcastNotificacao,
 )
 
 # Cria um roteador específico para operações do Painel Administrativo.
@@ -588,6 +589,78 @@ def admin_cancelar_reserva(reserva_id: int, admin_data=Depends(verificar_admin))
         conn.commit()
         return {
             "mensagem": f"Reserva de {res['titulo']} cancelada e dinheiro estornado."
+        }
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ==============================================================================
+# GRUPO DO WHATSAPP (CUPONS DE DESCONTO)
+# ==============================================================================
+
+
+@router.get("/grupo-whatsapp/pendentes")
+def listar_pendentes_grupo_whatsapp():
+    """
+    [R] Painel Admin: lista clientes que marcaram interesse em entrar no
+    grupo do WhatsApp e ainda não foram adicionados manualmente.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute(
+        "SELECT id, nome, telefone, email FROM utilizadores "
+        "WHERE quer_grupo_whatsapp = TRUE AND grupo_whatsapp_adicionado = FALSE "
+        "ORDER BY id DESC"
+    )
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
+
+
+@router.put("/grupo-whatsapp/{usuario_id}/marcar-adicionado")
+def marcar_adicionado_grupo_whatsapp(usuario_id: int):
+    """
+    [U] Painel Admin: marca que o cliente já foi adicionado manualmente ao
+    grupo do WhatsApp, tirando-o da lista de pendentes.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE utilizadores SET grupo_whatsapp_adicionado = TRUE WHERE id = %s",
+        (usuario_id,),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return {"status": "ok"}
+
+
+@router.post("/grupo-whatsapp/notificar-todos")
+def notificar_todos_grupo_whatsapp(dados: BroadcastNotificacao):
+    """
+    [C] Painel Admin: envia, sob demanda do admin, uma notificação in-app
+    para todos os clientes cadastrados avisando sobre o Grupo do WhatsApp.
+    Ignora quem já marcou o checkbox de interesse (esses já estão na lista
+    de pendentes acima, não precisam de um lembrete redundante).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO notificacoes (utilizador_id, mensagem, tipo) "
+            "SELECT id, %s, %s FROM utilizadores WHERE quer_grupo_whatsapp = FALSE",
+            (dados.mensagem, dados.tipo),
+        )
+        linhas = cursor.rowcount
+        conn.commit()
+        return {
+            "mensagem": f"Notificação enviada para {linhas} clientes.",
+            "total": linhas,
         }
     except Exception as e:
         conn.rollback()

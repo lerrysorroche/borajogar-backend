@@ -120,7 +120,7 @@ def cadastrar_usuario(usuario: UsuarioNovo):
         codigo_6_digitos = "".join(random.choices(string.digits, k=6))
 
         cursor.execute(
-            "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao, indicado_por, rank, email_verificado, codigo_verificacao) VALUES (%s, %s, %s, %s, %s, %s, 0, FALSE, %s) RETURNING id;",
+            "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao, indicado_por, rank, email_verificado, codigo_verificacao, quer_grupo_whatsapp) VALUES (%s, %s, %s, %s, %s, %s, 0, FALSE, %s, %s) RETURNING id;",
             (
                 usuario.nome,
                 usuario.email,
@@ -129,6 +129,7 @@ def cadastrar_usuario(usuario: UsuarioNovo):
                 meu_codigo,
                 indicado_por_id,
                 codigo_6_digitos,
+                usuario.quer_grupo_whatsapp,
             ),
         )
         novo_id = cursor.fetchone()[0]
@@ -333,8 +334,15 @@ def login_google(req: GoogleLoginRequest):
             )  # Senha padrão inacessível
 
             cursor.execute(
-                "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao, rank) VALUES (%s, %s, %s, %s, %s, 0) RETURNING id;",
-                (req.nome, req.email, senha_segura, req.telefone, meu_codigo),
+                "INSERT INTO utilizadores (nome, email, senha_hash, telefone, codigo_indicacao, rank, quer_grupo_whatsapp) VALUES (%s, %s, %s, %s, %s, 0, %s) RETURNING id;",
+                (
+                    req.nome,
+                    req.email,
+                    senha_segura,
+                    req.telefone,
+                    meu_codigo,
+                    req.quer_grupo_whatsapp,
+                ),
             )
             novo_id = cursor.fetchone()["id"]
             conn.commit()
@@ -519,7 +527,7 @@ def buscar_notificacoes(usuario_id: int, usuario=Depends(verificar_usuario)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
-        "SELECT id, reserva_id, jogo, mensagem, lida FROM notificacoes WHERE utilizador_id = %s AND lida = FALSE ORDER BY id DESC",
+        "SELECT id, reserva_id, jogo, mensagem, lida, tipo FROM notificacoes WHERE utilizador_id = %s AND lida = FALSE ORDER BY id DESC",
         (usuario_id,),
     )
     res = cursor.fetchall()
