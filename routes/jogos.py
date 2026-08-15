@@ -63,13 +63,14 @@ def listar_jogos(usuario_id: int = 0):
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
                 (SELECT COALESCE(SUM(CASE WHEN t.tipo = 'SAIDA' THEN t.valor WHEN t.tipo = 'ENTRADA' THEN -t.valor ELSE 0 END), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%%' || j.titulo || '%%') AS faturamento_total,
-                CASE 
-                    WHEN j.data_lancamento > CURRENT_DATE THEN 1 
-                    WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' THEN 2 
-                    ELSE 3 
+                j.meta_faturamento::float AS meta_faturamento,
+                CASE
+                    WHEN j.data_lancamento > CURRENT_DATE THEN 1
+                    WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' THEN 2
+                    ELSE 3
                 END as prioridade_vitrine
-            FROM jogos j 
-            ORDER BY 
+            FROM jogos j
+            ORDER BY
                 prioridade_vitrine ASC,
                 CASE WHEN j.data_lancamento > CURRENT_DATE THEN j.data_lancamento END ASC,
                 CASE WHEN j.data_lancamento >= CURRENT_DATE - INTERVAL '180 days' AND j.data_lancamento <= CURRENT_DATE THEN j.data_lancamento END DESC,
@@ -100,6 +101,7 @@ def listar_jogos(usuario_id: int = 0):
                 (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id AND l.status = 'ATIVA') AS proxima_devolucao,
                 (SELECT COUNT(*) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = j.id) AS popularidade,
                 (SELECT COALESCE(SUM(CASE WHEN t.tipo = 'SAIDA' THEN t.valor WHEN t.tipo = 'ENTRADA' THEN -t.valor ELSE 0 END), 0) FROM transacoes t WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%%' || j.titulo || '%%') AS faturamento_total,
+                j.meta_faturamento::float AS meta_faturamento,
                 0 AS rank_aplicado,
                 CASE 
                     WHEN j.data_lancamento > CURRENT_DATE THEN 1 
@@ -155,12 +157,12 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data=Depends(verificar_admin)):
     try:
         query = """
             INSERT INTO jogos (
-                titulo, plataforma, 
-                preco_aluguel, preco_aluguel_14, 
+                titulo, plataforma,
+                preco_aluguel, preco_aluguel_14,
                 preco_secundaria, preco_secundaria_14,
-                descricao, url_imagem, tempo_jogo, nota, data_lancamento, 
-                recomendacao_cliente
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+                descricao, url_imagem, tempo_jogo, nota, data_lancamento,
+                recomendacao_cliente, meta_faturamento
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
         """
         cursor.execute(
             query,
@@ -177,6 +179,7 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data=Depends(verificar_admin)):
                 jogo.nota,
                 jogo.data_lancamento,
                 jogo.recomendacao_cliente,
+                jogo.meta_faturamento,  # NOVO: quanto o jogo precisa gerar pra "se pagar"
             ),
         )
         conn.commit()
@@ -204,12 +207,12 @@ def editar_jogo_completo(
     cursor = conn.cursor()
     try:
         query = """
-            UPDATE jogos SET 
-                titulo = %s, plataforma = %s, 
-                preco_aluguel = %s, preco_aluguel_14 = %s, 
+            UPDATE jogos SET
+                titulo = %s, plataforma = %s,
+                preco_aluguel = %s, preco_aluguel_14 = %s,
                 preco_secundaria = %s, preco_secundaria_14 = %s,
-                descricao = %s, url_imagem = %s, tempo_jogo = %s, 
-                nota = %s, data_lancamento = %s 
+                descricao = %s, url_imagem = %s, tempo_jogo = %s,
+                nota = %s, data_lancamento = %s, meta_faturamento = %s
             WHERE id = %s
         """
         cursor.execute(
@@ -226,6 +229,7 @@ def editar_jogo_completo(
                 dados.tempo_jogo,
                 dados.nota,
                 dados.data_lancamento,
+                dados.meta_faturamento,
                 jogo_id,
             ),
         )

@@ -102,6 +102,7 @@ class JogoNovo(BaseModel):
     nota: float = 0.0
     data_lancamento: Optional[str] = None
     recomendacao_cliente: bool = False
+    meta_faturamento: float = 350.0  # Valor real de "jogo pago" (badge dourado na vitrine)
 
 
 class EditarJogoRequest(BaseModel):
@@ -121,6 +122,7 @@ class EditarJogoRequest(BaseModel):
     tempo_jogo: str = ""
     nota: float = 0.0
     data_lancamento: Optional[str] = None
+    meta_faturamento: float = 350.0
 
 
 class EditarPrecoJogoRequest(BaseModel):
