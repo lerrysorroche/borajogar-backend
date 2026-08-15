@@ -91,9 +91,9 @@ def buscar_estatisticas_admin(
     periodo: str = "mes", admin_data=Depends(verificar_admin)
 ):
     """
-    [R] Retorna os dados resumidos dos cards azuis/verdes no topo do painel Admin.
-    Calcula Faturamento via Recargas, Total de Clientes e Locações Ativas no momento,
-    filtrando com base no dropdown de tempo (mês atual, 30 dias, ano ou todos).
+    [R] Retorna os dados dos cards da Visão Geral do Painel Admin, organizados
+    em 3 grupos: Financeiro e Atividade no Período (respeitam o filtro de
+    tempo do dropdown) e Operação (estado em tempo real, ignora o filtro).
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -109,12 +109,57 @@ def buscar_estatisticas_admin(
         data_inicio = datetime(2000, 1, 1)
 
     try:
+        # ---------------- FINANCEIRO (respeita o período) ----------------
         cursor.execute(
             "SELECT SUM(valor) as total FROM transacoes WHERE tipo = 'ENTRADA' AND descricao LIKE 'Recarga%%' AND data_transacao >= %s",
             (data_inicio,),
         )
-        faturamento = cursor.fetchone()["total"] or 0.0
+        faturamento = float(cursor.fetchone()["total"] or 0.0)
 
+        # Aluguéis do período: usado tanto pra "Aluguéis Iniciados" (Atividade)
+        # quanto pro Ticket Médio (Financeiro) — uma query só evita repetir
+        # o mesmo WHERE duas vezes.
+        cursor.execute(
+            "SELECT COALESCE(SUM(valor), 0) as total, COUNT(*) as qtd FROM transacoes WHERE descricao LIKE 'Aluguel%%' AND data_transacao >= %s",
+            (data_inicio,),
+        )
+        row = cursor.fetchone()
+        faturamento_alugueis = float(row["total"] or 0)
+        alugueis_iniciados = row["qtd"] or 0
+        ticket_medio = (
+            faturamento_alugueis / alugueis_iniciados if alugueis_iniciados > 0 else 0.0
+        )
+
+        cursor.execute(
+            "SELECT COUNT(*) FILTER (WHERE status = 'CONCLUIDO') as concluidos, COUNT(*) as total FROM pedidos_pix WHERE data_criacao >= %s",
+            (data_inicio,),
+        )
+        row = cursor.fetchone()
+        pix_total = row["total"] or 0
+        taxa_conversao_pix = (
+            float(row["concluidos"] or 0) / pix_total * 100 if pix_total > 0 else 0.0
+        )
+
+        # ---------------- ATIVIDADE NO PERÍODO ----------------
+        cursor.execute(
+            "SELECT COUNT(*) as total FROM locacoes WHERE status = 'EXPIRADA' AND data_fim >= %s",
+            (data_inicio,),
+        )
+        devolucoes_periodo = cursor.fetchone()["total"] or 0
+
+        cursor.execute(
+            "SELECT COUNT(DISTINCT utilizador_id) as total FROM transacoes WHERE data_transacao >= %s",
+            (data_inicio,),
+        )
+        clientes_ativos_periodo = cursor.fetchone()["total"] or 0
+
+        cursor.execute(
+            "SELECT COUNT(*) as total FROM utilizadores WHERE data_criacao >= %s AND is_admin = false",
+            (data_inicio,),
+        )
+        novos_clientes = cursor.fetchone()["total"] or 0
+
+        # ---------------- OPERAÇÃO (tempo real, ignora o período) ----------------
         cursor.execute(
             "SELECT COUNT(*) as total FROM utilizadores WHERE is_admin = false"
         )
@@ -123,11 +168,97 @@ def buscar_estatisticas_admin(
         cursor.execute("SELECT COUNT(*) as total FROM locacoes WHERE status = 'ATIVA'")
         locacoes_ativas = cursor.fetchone()["total"] or 0
 
+        cursor.execute(
+            "SELECT COUNT(*) as total FROM contas_psn WHERE status_primaria = 'MANUTENCAO' OR status_secundaria = 'MANUTENCAO'"
+        )
+        contas_manutencao = cursor.fetchone()["total"] or 0
+
+        cursor.execute(
+            "SELECT COUNT(DISTINCT utilizador_id) as total FROM fila_espera WHERE status = 'AGUARDANDO'"
+        )
+        clientes_na_fila = cursor.fetchone()["total"] or 0
+
+        cursor.execute(
+            "SELECT COUNT(*) FILTER (WHERE status_primaria = 'ALUGADA') + COUNT(*) FILTER (WHERE status_secundaria = 'ALUGADA') as alugadas, COUNT(*) * 2 as total_slots FROM contas_psn"
+        )
+        row = cursor.fetchone()
+        total_slots = row["total_slots"] or 0
+        taxa_ocupacao = (
+            float(row["alugadas"] or 0) / total_slots * 100 if total_slots > 0 else 0.0
+        )
+
         return {
-            "faturamento": float(faturamento),
+            # já existentes (mantidos por compatibilidade)
+            "faturamento": faturamento,
             "total_clientes": clientes,
             "locacoes_ativas": locacoes_ativas,
+            # financeiro
+            "ticket_medio": round(ticket_medio, 2),
+            "taxa_conversao_pix": round(taxa_conversao_pix, 1),
+            # atividade no período
+            "alugueis_iniciados": alugueis_iniciados,
+            "devolucoes_periodo": devolucoes_periodo,
+            "clientes_ativos_periodo": clientes_ativos_periodo,
+            "novos_clientes": novos_clientes,
+            # operação (tempo real)
+            "contas_manutencao": contas_manutencao,
+            "clientes_na_fila": clientes_na_fila,
+            "taxa_ocupacao": round(taxa_ocupacao, 1),
         }
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/estatisticas/tendencia")
+def buscar_tendencia_novos_clientes(
+    periodo: str = "mes", admin_data=Depends(verificar_admin)
+):
+    """
+    [R] Série temporal de novos cadastros, para o gráfico da Visão Geral.
+    Reaproveita o mesmo corte de data do /admin/estatisticas. Para 'mes' e
+    '30dias' agrupa por dia; para 'ano' e 'tudo' agrupa por mês, para não
+    gerar um gráfico com 300+ pontos diários ilegíveis.
+
+    LIMITAÇÃO CONHECIDA: como 'data_criacao' foi adicionada via ALTER TABLE
+    com valor padrão CURRENT_TIMESTAMP, todo cliente cadastrado ANTES da
+    migração aparece com a mesma data (o dia em que a coluna foi criada).
+    Isso é preciso a partir da migração em diante, não retroativamente.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    hoje = datetime.now()
+
+    if periodo == "mes":
+        data_inicio = hoje.replace(day=1, hour=0, minute=0, second=0)
+        granularidade = "day"
+    elif periodo == "30dias":
+        data_inicio = hoje - timedelta(days=30)
+        granularidade = "day"
+    elif periodo == "ano":
+        data_inicio = hoje.replace(month=1, day=1, hour=0, minute=0, second=0)
+        granularidade = "month"
+    else:
+        data_inicio = datetime(2000, 1, 1)
+        granularidade = "month"
+
+    try:
+        cursor.execute(
+            """
+            SELECT DATE_TRUNC(%s, data_criacao) as bucket, COUNT(*) as total
+            FROM utilizadores
+            WHERE data_criacao >= %s AND is_admin = false
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            """,
+            (granularidade, data_inicio),
+        )
+        linhas = cursor.fetchall()
+        formato = "%Y-%m-%d" if granularidade == "day" else "%Y-%m"
+        return [
+            {"data": row["bucket"].strftime(formato), "novos_clientes": row["total"]}
+            for row in linhas
+        ]
     finally:
         cursor.close()
         conn.close()
