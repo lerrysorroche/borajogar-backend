@@ -52,10 +52,14 @@ def listar_jogos(usuario_id: int = 0):
 
         query = """
             SELECT j.id, j.titulo, j.plataforma, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
-                ROUND(CAST(j.preco_aluguel * %s AS numeric), 2)::float AS preco_aluguel, 
-                ROUND(CAST(j.preco_aluguel_14 * %s AS numeric), 2)::float AS preco_aluguel_14, 
-                ROUND(CAST(j.preco_secundaria * %s AS numeric), 2)::float AS preco_secundaria, 
+                ROUND(CAST(j.preco_aluguel * %s AS numeric), 2)::float AS preco_aluguel,
+                ROUND(CAST(j.preco_aluguel_14 * %s AS numeric), 2)::float AS preco_aluguel_14,
+                ROUND(CAST(j.preco_secundaria * %s AS numeric), 2)::float AS preco_secundaria,
                 ROUND(CAST(j.preco_secundaria_14 * %s AS numeric), 2)::float AS preco_secundaria_14,
+                j.preco_aluguel::float AS preco_aluguel_base,
+                j.preco_aluguel_14::float AS preco_aluguel_14_base,
+                j.preco_secundaria::float AS preco_secundaria_base,
+                j.preco_secundaria_14::float AS preco_secundaria_14_base,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_primaria = 'DISPONIVEL') AS estoque_primaria,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_secundaria = 'DISPONIVEL') AS estoque_secundaria,
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
@@ -92,8 +96,11 @@ def listar_jogos(usuario_id: int = 0):
         conn.rollback()
         # FALLBACK CORRIGIDO COM PRIORIDADE_VITRINE PARA NÃO QUEBRAR AS TAGS!
         query_segura = """
-            SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14, 
-                j.preco_secundaria, j.preco_secundaria_14, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+            SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14,
+                j.preco_secundaria, j.preco_secundaria_14,
+                j.preco_aluguel AS preco_aluguel_base, j.preco_aluguel_14 AS preco_aluguel_14_base,
+                j.preco_secundaria AS preco_secundaria_base, j.preco_secundaria_14 AS preco_secundaria_14_base,
+                j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_primaria = 'DISPONIVEL') AS estoque_primaria,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_secundaria = 'DISPONIVEL') AS estoque_secundaria,
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
