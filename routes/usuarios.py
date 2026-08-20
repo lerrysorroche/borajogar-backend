@@ -527,7 +527,7 @@ def buscar_notificacoes(usuario_id: int, usuario=Depends(verificar_usuario)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
-        "SELECT id, reserva_id, jogo, mensagem, lida, tipo FROM notificacoes WHERE utilizador_id = %s AND lida = FALSE ORDER BY id DESC",
+        "SELECT id, reserva_id, jogo, mensagem, lida, tipo, url_acao FROM notificacoes WHERE utilizador_id = %s AND lida = FALSE ORDER BY id DESC",
         (usuario_id,),
     )
     res = cursor.fetchall()
