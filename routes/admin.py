@@ -730,67 +730,33 @@ def admin_cancelar_reserva(reserva_id: int, admin_data=Depends(verificar_admin))
 
 
 # ==============================================================================
-# GRUPO DO WHATSAPP (CUPONS DE DESCONTO)
+# AVISOS GERAIS (BROADCAST)
 # ==============================================================================
 
 
-@router.get("/grupo-whatsapp/pendentes")
-def listar_pendentes_grupo_whatsapp():
+@router.post("/notificacoes/broadcast")
+def enviar_broadcast(dados: BroadcastNotificacao):
     """
-    [R] Painel Admin: lista clientes que marcaram interesse em entrar no
-    grupo do WhatsApp e ainda não foram adicionados manualmente.
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute(
-        "SELECT id, nome, telefone, email FROM utilizadores "
-        "WHERE quer_grupo_whatsapp = TRUE AND grupo_whatsapp_adicionado = FALSE "
-        "ORDER BY id DESC"
-    )
-    res = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return res
-
-
-@router.put("/grupo-whatsapp/{usuario_id}/marcar-adicionado")
-def marcar_adicionado_grupo_whatsapp(usuario_id: int):
-    """
-    [U] Painel Admin: marca que o cliente já foi adicionado manualmente ao
-    grupo do WhatsApp, tirando-o da lista de pendentes.
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE utilizadores SET grupo_whatsapp_adicionado = TRUE WHERE id = %s",
-        (usuario_id,),
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"status": "ok"}
-
-
-@router.post("/grupo-whatsapp/notificar-todos")
-def notificar_todos_grupo_whatsapp(dados: BroadcastNotificacao):
-    """
-    [C] Painel Admin: envia, sob demanda do admin, uma notificação in-app
-    para todos os clientes cadastrados avisando sobre o Grupo do WhatsApp.
-    Ignora quem já marcou o checkbox de interesse (esses já estão na lista
-    de pendentes acima, não precisam de um lembrete redundante).
+    [C] Painel Admin: envia um aviso in-app (mensagem + botão de ação
+    opcional) para todos os clientes cadastrados. Qualquer broadcast
+    anterior ainda não lido é marcado como lido antes do novo entrar,
+    pra não acumular avisos antigos no sino do cliente.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO notificacoes (utilizador_id, mensagem, tipo) "
-            "SELECT id, %s, %s FROM utilizadores WHERE quer_grupo_whatsapp = FALSE",
-            (dados.mensagem, dados.tipo),
+            "UPDATE notificacoes SET lida = TRUE WHERE tipo = 'BROADCAST' AND lida = FALSE"
+        )
+        cursor.execute(
+            "INSERT INTO notificacoes (utilizador_id, mensagem, url_acao, tipo) "
+            "SELECT id, %s, %s, 'BROADCAST' FROM utilizadores",
+            (dados.mensagem, dados.url_acao),
         )
         linhas = cursor.rowcount
         conn.commit()
         return {
-            "mensagem": f"Notificação enviada para {linhas} clientes.",
+            "mensagem": f"Aviso enviado para {linhas} clientes.",
             "total": linhas,
         }
     except Exception as e:
@@ -799,6 +765,29 @@ def notificar_todos_grupo_whatsapp(dados: BroadcastNotificacao):
     finally:
         cursor.close()
         conn.close()
+
+
+@router.get("/notificacoes/broadcast/historico")
+def historico_broadcast():
+    """
+    [R] Painel Admin: últimos 5 avisos enviados, pra reaproveitar texto.
+    Reconstrói a partir de notificacoes (não existe tabela própria) —
+    cada envio insere N linhas (uma por cliente) com o mesmo data_criacao,
+    porque o Postgres avalia CURRENT_TIMESTAMP uma única vez por comando;
+    agrupar por data_criacao junta essas N linhas de volta num só evento.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute(
+        "SELECT mensagem, url_acao, data_criacao FROM notificacoes "
+        "WHERE tipo = 'BROADCAST' "
+        "GROUP BY data_criacao, mensagem, url_acao "
+        "ORDER BY data_criacao DESC LIMIT 5"
+    )
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
 
 
 # ==============================================================================

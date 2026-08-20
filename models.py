@@ -296,9 +296,8 @@ class LerNotificacao(BaseModel):
 
 
 class BroadcastNotificacao(BaseModel):
-    """Painel Admin: dispara uma notificação avulsa (tipo customizável) para
-    todos os clientes cadastrados. Usado para avisar a base antiga sobre o
-    Grupo do WhatsApp, mas a mensagem é editável pelo admin antes do envio."""
+    """Painel Admin: dispara um aviso in-app (mensagem + botão de ação
+    opcional) para todos os clientes cadastrados."""
 
     mensagem: str
-    tipo: str = "GRUPO_WHATSAPP"
+    url_acao: Optional[str] = None
