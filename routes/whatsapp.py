@@ -10,7 +10,11 @@ from psycopg2.extras import RealDictCursor
 
 from auth import verificar_admin, verificar_usuario
 from database import get_db_connection
-from models import AtualizarTelefoneRequest, VerificarWhatsAdminRequest
+from models import (
+    AtualizarTelefoneRequest,
+    VerificarWhatsAdminRequest,
+    DesbloquearWhatsAppRequest,
+)
 
 router = APIRouter(tags=["Verificação WhatsApp"])
 
@@ -52,6 +56,27 @@ def telefones_equivalentes(numero_a: str, numero_b: str) -> bool:
     return bool(
         _variantes_telefone(normalizar_telefone(numero_a))
         & _variantes_telefone(normalizar_telefone(numero_b))
+    )
+
+
+def numero_ja_bloqueado(cursor, numero_bruto: str) -> bool:
+    """Verdadeiro se esse número (em qualquer variante do 9º dígito) já foi
+    verificado antes — em qualquer conta."""
+    variantes = list(_variantes_telefone(normalizar_telefone(numero_bruto)))
+    cursor.execute(
+        "SELECT 1 FROM whatsapp_bloqueados WHERE numero = ANY(%s) LIMIT 1",
+        (variantes,),
+    )
+    return cursor.fetchone() is not None
+
+
+def bloquear_numero(cursor, numero_bruto: str, utilizador_id: int):
+    """Registra o número como definitivamente verificado, travando-o pra
+    qualquer outra conta. Chamado sempre que whatsapp_verificado vira TRUE."""
+    cursor.execute(
+        "INSERT INTO whatsapp_bloqueados (numero, utilizador_id) VALUES (%s, %s) "
+        "ON CONFLICT (numero) DO NOTHING",
+        (normalizar_telefone(numero_bruto), utilizador_id),
     )
 
 
@@ -223,10 +248,15 @@ async def receber_webhook_whatsapp(request: Request):
             )
             return {"status": "numero_nao_confere"}
 
+        if numero_ja_bloqueado(cursor, numero_remetente):
+            print(f"Webhook WhatsApp: número {numero_remetente!r} já bloqueado, recusando.")
+            return {"status": "numero_bloqueado"}
+
         cursor.execute(
             "UPDATE utilizadores SET whatsapp_verificado = TRUE WHERE id = %s",
             (utilizador_id,),
         )
+        bloquear_numero(cursor, numero_remetente, utilizador_id)
         conn.commit()
 
         enviar_mensagem_whatsapp(
@@ -273,6 +303,11 @@ def atualizar_telefone(
             raise HTTPException(
                 status_code=400,
                 detail="Seu WhatsApp já foi verificado e o número não pode mais ser alterado.",
+            )
+        if numero_ja_bloqueado(cursor, dados.telefone):
+            raise HTTPException(
+                status_code=400,
+                detail="Este número de WhatsApp já foi verificado em outra conta e não pode ser usado novamente.",
             )
 
         cursor.execute(
@@ -328,16 +363,65 @@ def verificar_whatsapp_manual(
     mensagem mas, por algum motivo, o webhook automático não processou.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        cursor.execute(
+            "SELECT telefone FROM utilizadores WHERE id = %s", (dados.utilizador_id,)
+        )
+        usuario = cursor.fetchone()
+        if not usuario:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        if numero_ja_bloqueado(cursor, usuario["telefone"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Este número já foi verificado em outra conta. Desbloqueie-o antes de confirmar manualmente.",
+            )
+
         cursor.execute(
             "UPDATE utilizadores SET whatsapp_verificado = TRUE WHERE id = %s",
             (dados.utilizador_id,),
         )
+        bloquear_numero(cursor, usuario["telefone"], dados.utilizador_id)
         conn.commit()
         return {"mensagem": "WhatsApp confirmado manualmente com sucesso!"}
     except Exception as e:
         conn.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/admin/whatsapp/desbloquear")
+def desbloquear_whatsapp(
+    dados: DesbloquearWhatsAppRequest, admin_data=Depends(verificar_admin)
+):
+    """
+    [D] Painel Admin: libera um número bloqueado (ex: operadora reciclou o
+    chip e caiu num cliente novo e legítimo). Remove todas as variantes do
+    9º dígito de uma vez.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        variantes = list(_variantes_telefone(normalizar_telefone(dados.numero)))
+        cursor.execute(
+            "DELETE FROM whatsapp_bloqueados WHERE numero = ANY(%s) RETURNING numero",
+            (variantes,),
+        )
+        apagados = cursor.fetchall()
+        conn.commit()
+        if not apagados:
+            raise HTTPException(
+                status_code=404, detail="Nenhum bloqueio encontrado para esse número."
+            )
+        return {"mensagem": f"Número {dados.numero} desbloqueado com sucesso."}
+    except Exception as e:
+        conn.rollback()
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         cursor.close()

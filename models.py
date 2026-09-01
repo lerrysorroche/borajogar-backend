@@ -79,6 +79,13 @@ class VerificarWhatsAdminRequest(BaseModel):
     utilizador_id: int
 
 
+class DesbloquearWhatsAppRequest(BaseModel):
+    """Painel Admin: libera manualmente um número da trava permanente de
+    verificação (ex: reciclagem de chip pela operadora)."""
+
+    numero: str
+
+
 # ==============================================================================
 # MODELOS DE CATÁLOGO (JOGOS E ENQUETE)
 # ==============================================================================
