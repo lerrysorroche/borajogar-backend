@@ -962,3 +962,63 @@ def dossie_cliente(
     finally:
         cursor.close()
         conn.close()
+
+
+@router.get("/jogos/{jogo_id}/historico")
+def historico_jogo(jogo_id: int, admin_data=Depends(verificar_admin)):
+    """
+    [R] Extrato do jogo: toda movimentação financeira por trás do badge de
+    faturamento da vitrine (Painel Admin > vitrine, canto inferior esquerdo).
+
+    Não existe uma coluna ligando transacoes a jogo_id diretamente — o valor
+    do badge sempre foi calculado casando o título do jogo dentro da
+    descrição da transação (ver faturamento_total em routes/jogos.py). Esta
+    rota usa exatamente o mesmo casamento, para que a lista bata 100% com o
+    número mostrado no card.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT titulo FROM jogos WHERE id = %s", (jogo_id,))
+        jogo = cursor.fetchone()
+        if not jogo:
+            raise HTTPException(status_code=404, detail="Jogo não encontrado.")
+        titulo = jogo["titulo"]
+
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN t.tipo = 'SAIDA' THEN t.valor WHEN t.tipo = 'ENTRADA' THEN -t.valor ELSE 0 END), 0) AS faturamento_total
+            FROM transacoes t
+            WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%%' || %s || '%%'
+            """,
+            (titulo,),
+        )
+        faturamento_total = float(cursor.fetchone()["faturamento_total"])
+
+        cursor.execute(
+            """
+            SELECT t.utilizador_id, u.nome AS cliente_nome, t.tipo, t.valor, t.descricao, t.data_transacao
+            FROM transacoes t
+            JOIN utilizadores u ON u.id = t.utilizador_id
+            WHERE t.utilizador_id != 1 AND t.descricao ILIKE '%%' || %s || '%%'
+            ORDER BY t.data_transacao DESC
+            """,
+            (titulo,),
+        )
+        movimentacoes = cursor.fetchall()
+        for m in movimentacoes:
+            m["valor"] = float(m["valor"])
+
+        return {
+            "jogo": titulo,
+            "faturamento_total": faturamento_total,
+            "movimentacoes": movimentacoes,
+        }
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
