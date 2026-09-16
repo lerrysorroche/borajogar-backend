@@ -570,9 +570,12 @@ def listar_usuarios(admin_data=Depends(verificar_admin)):
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # NOVO: Adicionado 'rank' na busca SQL
+    # total_alugueis: conta qualquer locação já feita (ativa ou encerrada), pra o
+    # admin distinguir quem de fato alugou de quem só se cadastrou.
     cursor.execute(
-        "SELECT id, nome, email, telefone, saldo, is_admin, rank, whatsapp_verificado FROM utilizadores ORDER BY nome ASC"
+        "SELECT u.id, u.nome, u.email, u.telefone, u.saldo, u.is_admin, u.rank, u.whatsapp_verificado, "
+        "(SELECT COUNT(*) FROM locacoes l WHERE l.utilizador_id = u.id) AS total_alugueis "
+        "FROM utilizadores u ORDER BY u.nome ASC"
     )
     res = cursor.fetchall()
     cursor.close()
