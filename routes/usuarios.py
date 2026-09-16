@@ -29,9 +29,29 @@ from models import (
 
 router = APIRouter(tags=["Usuarios"])
 
+# Aviso que toda conta nova já recebe no sino, pra não precisar reenviar o
+# convite do grupo pela ferramenta de avisos toda semana. Usa tipo próprio
+# (não BROADCAST) pra não entrar no histórico de avisos do admin e não ser
+# apagado quando um aviso geral novo é disparado.
+MENSAGEM_BOAS_VINDAS = (
+    "Entre no grupo da locadora no Whatsapp! Receba cupons exclusivos, fique por "
+    "dentro das novidades e opine em diversos assuntos para ajudar a locadora a "
+    "crescer e melhorar. Clique no botão para entrar no grupo!"
+)
+URL_BOAS_VINDAS = "https://chat.whatsapp.com/Iw7PzDNFGo6FqJ61nWSB1X"
+
 # ==============================================================================
 # FUNÇÕES AUXILIARES
 # ==============================================================================
+
+
+def criar_aviso_boas_vindas(cursor, utilizador_id):
+    """Coloca o convite do grupo do WhatsApp no sino da conta recém-criada."""
+    cursor.execute(
+        "INSERT INTO notificacoes (utilizador_id, mensagem, url_acao, tipo) "
+        "VALUES (%s, %s, %s, 'BOAS_VINDAS')",
+        (utilizador_id, MENSAGEM_BOAS_VINDAS, URL_BOAS_VINDAS),
+    )
 
 
 def gerar_codigo_convite(nome):
@@ -133,6 +153,7 @@ def cadastrar_usuario(usuario: UsuarioNovo):
             ),
         )
         novo_id = cursor.fetchone()[0]
+        criar_aviso_boas_vindas(cursor, novo_id)
         conn.commit()
 
         # Dispara o e-mail em segundo plano
@@ -345,6 +366,7 @@ def login_google(req: GoogleLoginRequest):
                 ),
             )
             novo_id = cursor.fetchone()["id"]
+            criar_aviso_boas_vindas(cursor, novo_id)
             conn.commit()
 
             cursor.execute(
