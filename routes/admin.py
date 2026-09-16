@@ -299,30 +299,33 @@ def listar_contas_manutencao(admin_data=Depends(verificar_admin)):
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # Busca contas que tenham PELO MENOS UM dos slots travados em MANUTENCAO.
-    # O slot que realmente disparou a manutenção (mesma prioridade usada em
-    # liberar_conta_manutencao: primária primeiro, senão secundária). Os
-    # subqueries de "último cliente" filtram por ESSE slot -- antes buscavam
-    # em locacoes da conta inteira, então se a vaga secundária tivesse sido
-    # alugada DEPOIS (por outro cliente), ela "vencia" no ORDER BY data_fim
-    # mesmo quando quem voltou o jogo foi o cliente da primária.
+    # Uma linha POR VAGA em manutenção, não por conta: se a primária e a
+    # secundária da mesma conta caírem em manutenção ao mesmo tempo (cada
+    # uma com um cliente diferente), as duas precisam aparecer separadas,
+    # cada uma com o cliente certo -- por isso o UNION ALL em vez de tentar
+    # escolher "qual das duas" mostrar numa linha só.
     cursor.execute("""
-        SELECT c.id AS conta_psn_id, j.titulo AS jogo, c.email_login, c.senha_login AS senha_antiga,
-               (SELECT utilizador_id FROM locacoes WHERE conta_psn_id = c.id
-                    AND tipo_slot = CASE WHEN c.status_primaria = 'MANUTENCAO' THEN 'PRIMARIA' ELSE 'SECUNDARIA' END
-                    ORDER BY data_fim DESC LIMIT 1) AS ultimo_cliente_id,
-               (SELECT u.nome FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id
-                    AND l.tipo_slot = CASE WHEN c.status_primaria = 'MANUTENCAO' THEN 'PRIMARIA' ELSE 'SECUNDARIA' END
-                    ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_nome,
-               (SELECT u.telefone FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id
-                    AND l.tipo_slot = CASE WHEN c.status_primaria = 'MANUTENCAO' THEN 'PRIMARIA' ELSE 'SECUNDARIA' END
-                    ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_telefone,
-               (SELECT cashback_pendente FROM locacoes WHERE conta_psn_id = c.id
-                    AND tipo_slot = CASE WHEN c.status_primaria = 'MANUTENCAO' THEN 'PRIMARIA' ELSE 'SECUNDARIA' END
-                    ORDER BY data_fim DESC LIMIT 1) AS cashback_pendente,
+        SELECT c.id AS conta_psn_id, 'PRIMARIA' AS tipo_slot, j.titulo AS jogo, c.email_login, c.senha_login AS senha_antiga,
+               (SELECT utilizador_id FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'PRIMARIA' ORDER BY data_fim DESC LIMIT 1) AS ultimo_cliente_id,
+               (SELECT u.nome FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'PRIMARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_nome,
+               (SELECT u.telefone FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'PRIMARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_telefone,
+               (SELECT cashback_pendente FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'PRIMARIA' ORDER BY data_fim DESC LIMIT 1) AS cashback_pendente,
                c.status_primaria, c.status_secundaria
         FROM contas_psn c JOIN jogos j ON c.jogo_id = j.id
-        WHERE c.status_primaria = 'MANUTENCAO' OR c.status_secundaria = 'MANUTENCAO';
+        WHERE c.status_primaria = 'MANUTENCAO'
+
+        UNION ALL
+
+        SELECT c.id AS conta_psn_id, 'SECUNDARIA' AS tipo_slot, j.titulo AS jogo, c.email_login, c.senha_login AS senha_antiga,
+               (SELECT utilizador_id FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'SECUNDARIA' ORDER BY data_fim DESC LIMIT 1) AS ultimo_cliente_id,
+               (SELECT u.nome FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'SECUNDARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_nome,
+               (SELECT u.telefone FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'SECUNDARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_telefone,
+               (SELECT cashback_pendente FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'SECUNDARIA' ORDER BY data_fim DESC LIMIT 1) AS cashback_pendente,
+               c.status_primaria, c.status_secundaria
+        FROM contas_psn c JOIN jogos j ON c.jogo_id = j.id
+        WHERE c.status_secundaria = 'MANUTENCAO'
+
+        ORDER BY jogo, conta_psn_id, tipo_slot;
     """)
     res = cursor.fetchall()
     cursor.close()
