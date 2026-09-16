@@ -841,6 +841,14 @@ def dossie_cliente(
             SELECT
                 COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' THEN valor END), 0) AS total_entradas,
                 COALESCE(SUM(CASE WHEN tipo = 'SAIDA'   THEN valor END), 0) AS total_saidas,
+                -- Gasto real: saídas menos o que voltou por estorno (reserva
+                -- cancelada). Sem isso, reservar/cancelar/reservar de novo
+                -- contava o mesmo dinheiro várias vezes.
+                GREATEST(
+                    COALESCE(SUM(CASE WHEN tipo = 'SAIDA' THEN valor END), 0)
+                    - COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' AND descricao LIKE '💸 Estorno%%' THEN valor END), 0),
+                    0
+                ) AS total_gasto,
                 COALESCE(SUM(CASE WHEN descricao LIKE 'Recarga%%' THEN valor END), 0) AS total_recargas,
                 COUNT(*) FILTER (WHERE descricao LIKE 'Recarga%%') AS qtd_recargas
             FROM transacoes WHERE utilizador_id = %s
