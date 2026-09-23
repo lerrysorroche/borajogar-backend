@@ -7,7 +7,7 @@ import os
 
 from auth import verificar_admin
 from database import get_db_connection
-from notificacoes import enviar_email
+from notificacoes import enviar_email, notificar_jogo_liberado, FRONTEND_URL
 from routes import usuarios, jogos, pagamentos, alugueis, admin, whatsapp
 from routes.pagamentos import processar_sucesso_pagamento, credentials_efi
 from routes.whatsapp import enviar_template_whatsapp, normalizar_telefone
@@ -155,8 +155,11 @@ def enviar_lembretes_devolucao():
                 enviar_email(
                     loc["email"],
                     "⏰ Seu aluguel na Bora Jogar vence em breve!",
-                    f"<p>Fala, {loc['nome']}! Faltam 12h pro fim do seu aluguel de <strong>{loc['titulo']}</strong>. "
+                    f"Faltam 12h, {loc['nome']}!",
+                    f"<p>Seu aluguel de <strong>{loc['titulo']}</strong> está perto de vencer. "
                     "Não esqueça de clicar em 'Devolver' na aba 'Meus Acessos' pra garantir seu Cashback e subir de Rank!</p>",
+                    cta_label="Ir para Meus Acessos",
+                    cta_url=FRONTEND_URL,
                 )
             if loc.get("telefone"):
                 # O template aprovado pela Meta ficou só com {{1}} = nome do jogo
@@ -249,25 +252,9 @@ def processar_filas_automaticamente():
                         (conta["id"],),
                     )
 
-                    msg = f"🎉 SEU ACESSO FOI LIBERADO! A sua vaga ({tipo_slot}) do jogo {titulo} já está na aba 'Meus Acessos'. Bom jogo!"
-                    cursor.execute(
-                        "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
-                        (proximo["utilizador_id"], proximo["id"], titulo, msg),
-                    )
                     conn.commit()
-
-                    if proximo.get("email"):
-                        enviar_email(
-                            proximo["email"],
-                            "🎮 Seu jogo já está liberado na Bora Jogar!",
-                            f"<p>Fala, {proximo['nome']}! Sua vez chegou: o jogo <strong>{titulo}</strong> já está liberado na sua conta. Acesse a aba 'Meus Acessos' no site pra pegar os dados de acesso.</p>",
-                        )
-                    if proximo.get("telefone"):
-                        enviar_template_whatsapp(
-                            normalizar_telefone(proximo["telefone"]),
-                            "jogo_pronto",
-                            [proximo["nome"], titulo],
-                        )
+                    notificar_jogo_liberado(cursor, proximo, titulo, tipo_slot)
+                    conn.commit()
                 else:
                     break
     except Exception as e:

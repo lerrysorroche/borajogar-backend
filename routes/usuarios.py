@@ -2,11 +2,9 @@ from fastapi import APIRouter, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 import string
 import random
-import os
-import urllib.request
-import json
 
 from database import get_db_connection
+from notificacoes import enviar_email
 from auth import (
     verificar_admin,
     verificar_usuario,
@@ -48,9 +46,14 @@ URL_BOAS_VINDAS = "https://chat.whatsapp.com/Iw7PzDNFGo6FqJ61nWSB1X"
 def criar_aviso_boas_vindas(cursor, utilizador_id):
     """Coloca o convite do grupo do WhatsApp no sino da conta recém-criada."""
     cursor.execute(
-        "INSERT INTO notificacoes (utilizador_id, mensagem, url_acao, tipo) "
-        "VALUES (%s, %s, %s, 'BOAS_VINDAS')",
-        (utilizador_id, MENSAGEM_BOAS_VINDAS, URL_BOAS_VINDAS),
+        "INSERT INTO notificacoes (utilizador_id, mensagem, titulo, url_acao, tipo) "
+        "VALUES (%s, %s, %s, %s, 'BOAS_VINDAS')",
+        (
+            utilizador_id,
+            MENSAGEM_BOAS_VINDAS,
+            "🎉 Bem-vindo(a) à Bora Jogar!",
+            URL_BOAS_VINDAS,
+        ),
     )
 
 
@@ -66,47 +69,18 @@ def gerar_codigo_convite(nome):
 
 
 def disparar_email_confirmacao(email_destino, nome, codigo):
-    """
-    Usa a infraestrutura do Brevo para enviar o código de 6 dígitos.
-    Roda de forma silenciosa para não travar a requisição do usuário.
-    """
-    try:
-        remetente = os.getenv("EMAIL_REMETENTE")
-        chave_api = os.getenv("BREVO_API_KEY")
-        if chave_api and remetente:
-            url = "https://api.brevo.com/v3/smtp/email"
-            headers = {
-                "accept": "application/json",
-                "api-key": chave_api,
-                "content-type": "application/json",
-            }
-            html_body = f"""
-            <div style="font-family: sans-serif; max-w-md; margin: auto; padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #09090b; color: #fff;">
-                <h2 style="color: #3b82f6;">Bem-vindo(a) à BORA JOGAR! 🎮</h2>
-                <p style="color: #d4d4d8;">Olá, {nome}! Falta apenas um passo para você liberar sua conta e começar a jogar.</p>
-                <p style="color: #d4d4d8;">Use o código de segurança abaixo no site para confirmar seu e-mail:</p>
-                <div style="background-color: #18181b; padding: 15px; border-radius: 8px; text-align: center; margin: 20px 0;">
-                    <span style="font-size: 28px; font-weight: bold; letter-spacing: 5px; color: #10b981;">{codigo}</span>
-                </div>
-                <p style="font-size: 12px; color: #71717a;">Se você não solicitou este cadastro, pode ignorar este e-mail.</p>
-            </div>
-            """
-            payload = {
-                "sender": {"name": "Equipe Bora Jogar", "email": remetente},
-                "to": [{"email": email_destino}],
-                "subject": "🎮 Bora Jogar - Código de Confirmação",
-                "htmlContent": html_body,
-            }
-            req_http = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(req_http) as response:
-                pass
-    except Exception as e:
-        print(f"Aviso: Falha ao enviar e-mail de confirmação: {e}")
+    """Envia o código de 6 dígitos usando o template central de e-mail."""
+    enviar_email(
+        email_destino,
+        "🎮 Bora Jogar - Código de Confirmação",
+        f"Bem-vindo(a), {nome}!",
+        "<p>Falta apenas um passo para você liberar sua conta e começar a jogar.</p>"
+        "<p>Use o código de segurança abaixo no site para confirmar seu e-mail:</p>"
+        f'<div style="background-color:#18181b; padding:15px; border-radius:8px; text-align:center; margin:20px 0;">'
+        f'<span style="font-size:28px; font-weight:bold; letter-spacing:5px; color:#10b981;">{codigo}</span>'
+        "</div>"
+        '<p style="font-size:12px; color:#71717a;">Se você não solicitou este cadastro, pode ignorar este e-mail.</p>',
+    )
 
 
 # ==============================================================================
@@ -430,36 +404,18 @@ def esqueci_senha(req: EsqueciSenhaRequest):
     )
     conn.commit()
 
-    # Disparo de e-mail via Brevo REST API
-    try:
-        remetente = os.getenv("EMAIL_REMETENTE")
-        chave_api = os.getenv("BREVO_API_KEY")
-        if chave_api and remetente:
-            url = "https://api.brevo.com/v3/smtp/email"
-            headers = {
-                "accept": "application/json",
-                "api-key": chave_api,
-                "content-type": "application/json",
-            }
-            payload = {
-                "sender": {"name": "Equipe Bora Jogar", "email": remetente},
-                "to": [{"email": req.email}],
-                "subject": "Bora Jogar - Recuperação de Senha",
-                "htmlContent": f"Sua nova senha temporária é: <strong>{nova_senha}</strong><br>Por favor, altere-a no painel Meus Acessos.",
-            }
-            req_http = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(req_http) as response:
-                pass
-    except Exception:
-        pass
-    finally:
-        cursor.close()
-        conn.close()
+    enviar_email(
+        req.email,
+        "🔐 Bora Jogar - Recuperação de Senha",
+        f"Sua senha foi redefinida, {usuario['nome']}!",
+        "<p>Sua nova senha temporária é:</p>"
+        f'<div style="background-color:#18181b; padding:15px; border-radius:8px; text-align:center; margin:20px 0;">'
+        f'<span style="font-size:22px; font-weight:bold; letter-spacing:2px; color:#10b981;">{nova_senha}</span>'
+        "</div>"
+        "<p>Por segurança, altere-a assim que entrar, na aba 'Meus Acessos' &gt; 'Segurança da Conta'.</p>",
+    )
+    cursor.close()
+    conn.close()
 
     return {
         "mensagem": "Se este e-mail estiver cadastrado, uma nova senha foi enviada."
@@ -549,7 +505,7 @@ def buscar_notificacoes(usuario_id: int, usuario=Depends(verificar_usuario)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
-        "SELECT id, reserva_id, jogo, mensagem, lida, tipo, url_acao FROM notificacoes WHERE utilizador_id = %s AND lida = FALSE ORDER BY id DESC",
+        "SELECT id, reserva_id, jogo, mensagem, titulo, lida, tipo, url_acao FROM notificacoes WHERE utilizador_id = %s AND lida = FALSE ORDER BY id DESC",
         (usuario_id,),
     )
     res = cursor.fetchall()

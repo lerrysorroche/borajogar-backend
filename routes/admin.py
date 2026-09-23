@@ -4,8 +4,7 @@ from datetime import datetime, timedelta
 
 from database import get_db_connection
 from auth import verificar_admin
-from notificacoes import enviar_email
-from routes.whatsapp import enviar_template_whatsapp, normalizar_telefone
+from notificacoes import notificar_jogo_liberado
 from models import (
     EditarClienteRequest,
     ConfigRequest,
@@ -427,11 +426,6 @@ def liberar_conta_manutencao(
                 f"UPDATE contas_psn SET {coluna_status} = 'ALUGADA' WHERE id = %s",
                 (dados.conta_psn_id,),
             )
-            mensagem_sino = f"🎉 SEU ACESSO FOI LIBERADO! A sua vaga ({slot_em_manutencao}) do jogo {titulo} já está na aba 'Meus Acessos'. Bom jogo!"
-            cursor.execute(
-                "INSERT INTO notificacoes (utilizador_id, reserva_id, jogo, mensagem) VALUES (%s, %s, %s, %s)",
-                (proximo["utilizador_id"], proximo["id"], titulo, mensagem_sino),
-            )
             msg = f"Senha alterada e Conta Auditada! A vaga {slot_em_manutencao} foi entregue para o próximo da fila."
         else:
             # Não tem fila: Apenas devolve o slot para a prateleira
@@ -449,18 +443,8 @@ def liberar_conta_manutencao(
         # fila efetivamente recebe o jogo na maioria dos casos. Sem isto, sino,
         # e-mail e WhatsApp nunca disparavam nesse fluxo.
         if proximo:
-            if proximo.get("email"):
-                enviar_email(
-                    proximo["email"],
-                    "🎮 Seu jogo já está liberado na Bora Jogar!",
-                    f"<p>Fala, {proximo['nome']}! Sua vez chegou: o jogo <strong>{titulo}</strong> já está liberado na sua conta. Acesse a aba 'Meus Acessos' no site pra pegar os dados de acesso.</p>",
-                )
-            if proximo.get("telefone"):
-                enviar_template_whatsapp(
-                    normalizar_telefone(proximo["telefone"]),
-                    "jogo_pronto",
-                    [proximo["nome"], titulo],
-                )
+            notificar_jogo_liberado(cursor, proximo, titulo, slot_em_manutencao)
+            conn.commit()
 
         return {"mensagem": msg}
     except Exception as e:
