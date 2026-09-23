@@ -12,6 +12,7 @@ from efipay import EfiPay
 from database import get_db_connection
 from auth import verificar_admin, verificar_usuario
 from models import NovaRecarga, NovoCupom
+from notificacoes import enviar_email, FRONTEND_URL
 
 router = APIRouter(tags=["Pagamentos"])
 
@@ -186,7 +187,7 @@ def processar_sucesso_pagamento(
 
         # 1. Adiciona o saldo principal (Recarga + Cupom)
         cursor.execute(
-            "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s RETURNING nome, indicado_por",
+            "UPDATE utilizadores SET saldo = saldo + %s WHERE id = %s RETURNING nome, email, indicado_por",
             (valor_total, user_id),
         )
         cliente = cursor.fetchone()
@@ -228,10 +229,42 @@ def processar_sucesso_pagamento(
                 ),
             )
 
+        # Recibo: sino sempre, e-mail só se a conta tiver um endereço salvo.
+        mensagem_sino = f"Sua recarga de R$ {valor_pago:.2f} foi confirmada"
+        if valor_bonus > 0:
+            mensagem_sino += f" (+ R$ {valor_bonus:.2f} de bônus)"
+        mensagem_sino += f". Novo total creditado: R$ {valor_total:.2f}."
+        cursor.execute(
+            "INSERT INTO notificacoes (utilizador_id, mensagem, titulo, tipo) "
+            "VALUES (%s, %s, %s, 'RECARGA')",
+            (user_id, mensagem_sino, "💰 Recarga Confirmada!"),
+        )
+
         # O claim do topo já marcou o pedido como CONCLUIDO. Commit fecha o
-        # claim e os créditos juntos: se algo falhar no meio, o rollback
-        # devolve o pedido para PENDENTE e ele pode ser reprocessado.
+        # claim, os créditos e o aviso de recibo juntos: se algo falhar no
+        # meio, o rollback devolve o pedido para PENDENTE e ele pode ser
+        # reprocessado sem deixar um recibo "falso" registrado.
         conn.commit()
+
+        if cliente.get("email"):
+            corpo_html = f"<p>Valor pago: <strong>R$ {valor_pago:.2f}</strong></p>"
+            if valor_bonus > 0:
+                rotulo_bonus = f"Bônus ({cupom_nome})" if cupom_nome else "Bônus"
+                corpo_html += (
+                    f"<p>{rotulo_bonus}: <strong>R$ {valor_bonus:.2f}</strong></p>"
+                )
+            corpo_html += (
+                f'<p style="margin-top:16px; font-size:16px;">Total creditado: '
+                f'<strong style="color:#10b981;">R$ {valor_total:.2f}</strong></p>'
+            )
+            enviar_email(
+                cliente["email"],
+                "💰 Recibo da sua recarga - Bora Jogar",
+                f"Recarga confirmada, {cliente['nome']}!",
+                corpo_html,
+                cta_label="Ver Extrato",
+                cta_url=FRONTEND_URL,
+            )
     except Exception as e:
         conn.rollback()
         print(f"Erro Pagamento DB: {e}")
