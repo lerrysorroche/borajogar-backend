@@ -106,6 +106,7 @@ class JogoNovo(BaseModel):
     descricao: str
     url_imagem: str = ""
     tempo_jogo: str = ""
+    tempo_platina: str = ""
     nota: float = 0.0
     data_lancamento: Optional[str] = None
     recomendacao_cliente: bool = False
@@ -127,6 +128,7 @@ class EditarJogoRequest(BaseModel):
     descricao: str
     url_imagem: str = ""
     tempo_jogo: str = ""
+    tempo_platina: str = ""
     nota: float = 0.0
     data_lancamento: Optional[str] = None
     meta_faturamento: float = 350.0

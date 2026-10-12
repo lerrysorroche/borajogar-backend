@@ -1004,3 +1004,46 @@ def historico_jogo(jogo_id: int, admin_data=Depends(verificar_admin)):
     finally:
         cursor.close()
         conn.close()
+
+
+@router.get("/jogos/hltb")
+async def buscar_dados_hltb(titulo: str, admin_data=Depends(verificar_admin)):
+    """
+    [R] Busca no HowLongToBeat o tempo da história principal, o tempo
+    'completionist' (100%) e a nota da comunidade de um jogo, para o botão
+    "Buscar" do cadastro de jogos.
+
+    O HowLongToBeat não tem API oficial: usa-se a biblioteca de terceiros
+    'howlongtobeatpy', que raspa o site e já quebrou quando eles mudaram o
+    endereço interno da busca. Por isso o import é feito aqui dentro (uma
+    biblioteca quebrada não derruba a API inteira) e qualquer falha vira um
+    erro 502 que o painel mostra sem impedir o preenchimento manual.
+    """
+    try:
+        from howlongtobeatpy import HowLongToBeat
+
+        resultados = await HowLongToBeat().async_search(titulo)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Não foi possível consultar o HowLongToBeat: {e}",
+        )
+
+    if not resultados:
+        return {"encontrado": False}
+
+    melhor = max(resultados, key=lambda r: r.similarity)
+
+    def formatar_horas(horas):
+        # 0 = o site não tem esse dado (comum em jogo que ainda não saiu).
+        return f"{max(1, round(horas))}h" if horas and horas >= 0.5 else ""
+
+    return {
+        "encontrado": True,
+        "nome": melhor.game_name,
+        "similaridade": round(melhor.similarity, 2),
+        "tempo_jogo": formatar_horas(melhor.main_story),
+        "tempo_platina": formatar_horas(melhor.completionist),
+        # O HowLongToBeat dá a nota de 0 a 100; o site passa a mostrar de 0 a 10.
+        "nota": round((melhor.review_score or 0) / 10, 1),
+    }
