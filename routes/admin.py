@@ -42,8 +42,7 @@ def set_config(dados: ConfigRequest, admin_data=Depends(verificar_admin)):
                 SET devolucao_dinamica = %s, 
                     valor_por_dia = %s, 
                     anuncio_ativo = %s, 
-                    mensagem_anuncio = %s, 
-                    banners_url = %s,
+                    mensagem_anuncio = %s,
                     enquete_titulo = %s,
                     enquete_subtitulo = %s
                 """,
@@ -52,7 +51,6 @@ def set_config(dados: ConfigRequest, admin_data=Depends(verificar_admin)):
                     dados.valor_por_dia,
                     dados.anuncio_ativo,
                     dados.mensagem_anuncio,
-                    dados.banners_url,
                     dados.enquete_titulo,
                     dados.enquete_subtitulo,
                 ),

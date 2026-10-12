@@ -67,13 +67,27 @@ def get_config():
     """
     [R] Rota Pública.
     Retorna os banners e textos que o Frontend usa para desenhar a vitrine.
+
+    O carrossel do topo é automático: são as capas dos 5 jogos cadastrados mais
+    recentemente (maior id; a tabela não guarda data de cadastro). A coluna
+    'banners_url' da tabela deixou de ser lida.
     """
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("SELECT * FROM configuracoes LIMIT 1")
-        config = cursor.fetchone()
-        return config if config else {}
+        config = cursor.fetchone() or {}
+
+        cursor.execute(
+            "SELECT url_imagem FROM jogos "
+            "WHERE url_imagem IS NOT NULL AND TRIM(url_imagem) <> '' "
+            "ORDER BY id DESC LIMIT 5"
+        )
+        banners = [linha["url_imagem"].strip() for linha in cursor.fetchall()]
+        config["banners"] = banners
+        # Mantido só para um frontend antigo (ainda em cache) continuar funcionando.
+        config["banners_url"] = ",".join(banners)
+        return config
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
