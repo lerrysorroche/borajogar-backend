@@ -1,9 +1,11 @@
 from fastapi import APIRouter, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
+import threading
 
 from database import get_db_connection
 from auth import verificar_admin
+import hltb
 from notificacoes import notificar_jogo_liberado
 from models import (
     EditarClienteRequest,
@@ -1033,17 +1035,29 @@ async def buscar_dados_hltb(titulo: str, admin_data=Depends(verificar_admin)):
         return {"encontrado": False}
 
     melhor = max(resultados, key=lambda r: r.similarity)
+    return {"encontrado": True, **hltb.extrair_dados(melhor)}
 
-    def formatar_horas(horas):
-        # 0 = o site não tem esse dado (comum em jogo que ainda não saiu).
-        return f"{max(1, round(horas))}h" if horas and horas >= 0.5 else ""
 
-    return {
-        "encontrado": True,
-        "nome": melhor.game_name,
-        "similaridade": round(melhor.similarity, 2),
-        "tempo_jogo": formatar_horas(melhor.main_story),
-        "tempo_platina": formatar_horas(melhor.completionist),
-        # O HowLongToBeat dá a nota de 0 a 100; o site passa a mostrar de 0 a 10.
-        "nota": round((melhor.review_score or 0) / 10, 1),
-    }
+@router.post("/jogos/atualizar-hltb")
+def iniciar_atualizacao_hltb(admin_data=Depends(verificar_admin)):
+    """
+    [U] Reconsulta o HowLongToBeat para TODOS os jogos do catálogo (tempo da
+    história, tempo 100% e nota). Leva alguns minutos (há uma pausa entre as
+    buscas), então roda em segundo plano e responde na hora; o andamento é lido
+    em /admin/jogos/atualizar-hltb/status. A mesma rotina roda sozinha todo dia,
+    só nos jogos que passaram do intervalo (ver hltb.py).
+    """
+    if hltb.estado.get("rodando"):
+        raise HTTPException(
+            status_code=409, detail="Já existe uma atualização em andamento."
+        )
+    threading.Thread(
+        target=hltb.atualizar_jogos, kwargs={"forcar": True}, daemon=True
+    ).start()
+    return {"mensagem": "Atualização iniciada! Acompanhe o andamento no painel."}
+
+
+@router.get("/jogos/atualizar-hltb/status")
+def status_atualizacao_hltb(admin_data=Depends(verificar_admin)):
+    """[R] Andamento (ou resultado) da última atualização pelo HowLongToBeat."""
+    return {**hltb.estado, "intervalo_dias": hltb.INTERVALO_DIAS}
