@@ -1,9 +1,11 @@
 from fastapi import APIRouter, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
+import threading
 
 from database import get_db_connection
 from auth import verificar_admin
+import hltb
 from notificacoes import notificar_jogo_liberado
 from models import (
     EditarClienteRequest,
@@ -1004,3 +1006,58 @@ def historico_jogo(jogo_id: int, admin_data=Depends(verificar_admin)):
     finally:
         cursor.close()
         conn.close()
+
+
+@router.get("/jogos/hltb")
+async def buscar_dados_hltb(titulo: str, admin_data=Depends(verificar_admin)):
+    """
+    [R] Busca no HowLongToBeat o tempo da história principal, o tempo
+    'completionist' (100%) e a nota da comunidade de um jogo, para o botão
+    "Buscar" do cadastro de jogos.
+
+    O HowLongToBeat não tem API oficial: usa-se a biblioteca de terceiros
+    'howlongtobeatpy', que raspa o site e já quebrou quando eles mudaram o
+    endereço interno da busca. Por isso o import é feito aqui dentro (uma
+    biblioteca quebrada não derruba a API inteira) e qualquer falha vira um
+    erro 502 que o painel mostra sem impedir o preenchimento manual.
+    """
+    try:
+        from howlongtobeatpy import HowLongToBeat
+
+        resultados = await HowLongToBeat().async_search(titulo)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Não foi possível consultar o HowLongToBeat: {e}",
+        )
+
+    if not resultados:
+        return {"encontrado": False}
+
+    melhor = max(resultados, key=lambda r: r.similarity)
+    return {"encontrado": True, **hltb.extrair_dados(melhor)}
+
+
+@router.post("/jogos/atualizar-hltb")
+def iniciar_atualizacao_hltb(admin_data=Depends(verificar_admin)):
+    """
+    [U] Reconsulta o HowLongToBeat para TODOS os jogos do catálogo (tempo da
+    história, tempo 100% e nota). Leva alguns minutos (há uma pausa entre as
+    buscas), então roda em segundo plano e responde na hora; o andamento é lido
+    em /admin/jogos/atualizar-hltb/status. A mesma rotina roda sozinha todo dia,
+    só nos jogos que passaram do intervalo (ver hltb.py).
+    """
+    if hltb.estado.get("rodando"):
+        raise HTTPException(
+            status_code=409, detail="Já existe uma atualização em andamento."
+        )
+    threading.Thread(
+        target=hltb.atualizar_jogos, kwargs={"forcar": True}, daemon=True
+    ).start()
+    return {"mensagem": "Atualização iniciada! Acompanhe o andamento no painel."}
+
+
+@router.get("/jogos/atualizar-hltb/status")
+def status_atualizacao_hltb(admin_data=Depends(verificar_admin)):
+    """[R] Andamento (ou resultado) da última atualização pelo HowLongToBeat."""
+    return {**hltb.estado, "intervalo_dias": hltb.INTERVALO_DIAS}

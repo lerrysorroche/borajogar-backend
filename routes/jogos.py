@@ -51,7 +51,7 @@ def listar_jogos(usuario_id: int = 0):
         fator_desconto = 1.0 - (rank_cliente / 100.0)
 
         query = """
-            SELECT j.id, j.titulo, j.plataforma, j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+            SELECT j.id, j.titulo, j.plataforma, j.descricao, j.url_imagem, j.tempo_jogo, j.tempo_platina, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 ROUND(CAST(j.preco_aluguel * %s AS numeric), 2)::float AS preco_aluguel,
                 ROUND(CAST(j.preco_aluguel_14 * %s AS numeric), 2)::float AS preco_aluguel_14,
                 ROUND(CAST(j.preco_secundaria * %s AS numeric), 2)::float AS preco_secundaria,
@@ -107,7 +107,7 @@ def listar_jogos(usuario_id: int = 0):
                 j.preco_secundaria, j.preco_secundaria_14,
                 j.preco_aluguel AS preco_aluguel_base, j.preco_aluguel_14 AS preco_aluguel_14_base,
                 j.preco_secundaria AS preco_secundaria_base, j.preco_secundaria_14 AS preco_secundaria_14_base,
-                j.descricao, j.url_imagem, j.tempo_jogo, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+                j.descricao, j.url_imagem, j.tempo_jogo, j.tempo_platina, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_primaria = 'DISPONIVEL') AS estoque_primaria,
                 (SELECT COUNT(*) FROM contas_psn WHERE jogo_id = j.id AND status_secundaria = 'DISPONIVEL') AS estoque_secundaria,
                 (SELECT COUNT(*) FROM fila_espera WHERE jogo_id = j.id AND status = 'AGUARDANDO') AS tamanho_fila,
@@ -178,9 +178,9 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data=Depends(verificar_admin)):
                 titulo, plataforma,
                 preco_aluguel, preco_aluguel_14,
                 preco_secundaria, preco_secundaria_14,
-                descricao, url_imagem, tempo_jogo, nota, data_lancamento,
+                descricao, url_imagem, tempo_jogo, tempo_platina, nota, data_lancamento,
                 recomendacao_cliente, meta_faturamento
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
         """
         cursor.execute(
             query,
@@ -194,6 +194,7 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data=Depends(verificar_admin)):
                 jogo.descricao,
                 jogo.url_imagem,
                 jogo.tempo_jogo,
+                jogo.tempo_platina,
                 jogo.nota,
                 jogo.data_lancamento,
                 jogo.recomendacao_cliente,
@@ -229,7 +230,7 @@ def editar_jogo_completo(
                 titulo = %s, plataforma = %s,
                 preco_aluguel = %s, preco_aluguel_14 = %s,
                 preco_secundaria = %s, preco_secundaria_14 = %s,
-                descricao = %s, url_imagem = %s, tempo_jogo = %s,
+                descricao = %s, url_imagem = %s, tempo_jogo = %s, tempo_platina = %s,
                 nota = %s, data_lancamento = %s, meta_faturamento = %s
             WHERE id = %s
         """
@@ -245,6 +246,7 @@ def editar_jogo_completo(
                 dados.descricao,
                 dados.url_imagem,
                 dados.tempo_jogo,
+                dados.tempo_platina,
                 dados.nota,
                 dados.data_lancamento,
                 dados.meta_faturamento,

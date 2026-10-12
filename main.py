@@ -7,6 +7,7 @@ import os
 
 from auth import verificar_admin
 from database import get_db_connection
+import hltb
 from notificacoes import enviar_email, notificar_jogo_liberado, FRONTEND_URL
 from routes import usuarios, jogos, pagamentos, alugueis, admin, whatsapp
 from routes.pagamentos import processar_sucesso_pagamento, credentials_efi
@@ -368,6 +369,20 @@ def limpar_cupons_surpresa_cron():
         conn.close()
 
 
+def atualizar_hltb_cron():
+    """
+    Cron Job (Diário às 04:00):
+    Reconsulta o HowLongToBeat (tempo da história, tempo 100% e nota) para os
+    jogos que nunca foram consultados ou passaram de HLTB_INTERVALO_DIAS dias
+    (padrão 7). Rodar todo dia, mas só mexer em quem está "vencido", faz o
+    intervalo sobreviver a reinícios do servidor e espalha a carga.
+    """
+    try:
+        hltb.atualizar_jogos(forcar=False)
+    except Exception as e:
+        print(f"Erro no Cron do HowLongToBeat: {e}")
+
+
 @app.post("/admin/forcar-processamento-filas", tags=["Admin"])
 def forcar_filas(admin_data=Depends(verificar_admin)):
     """
@@ -390,6 +405,13 @@ def iniciar_servicos():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Colunas novas dos jogos (HowLongToBeat). IF NOT EXISTS: seguro rodar sempre.
+        cursor.execute(
+            "ALTER TABLE jogos ADD COLUMN IF NOT EXISTS tempo_platina VARCHAR(20) DEFAULT ''"
+        )
+        cursor.execute(
+            "ALTER TABLE jogos ADD COLUMN IF NOT EXISTS hltb_atualizado_em TIMESTAMP"
+        )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS notificacoes (id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255), mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
@@ -408,5 +430,8 @@ def iniciar_servicos():
 
     # NOVO: Faxina de cupons rodando todo dia às 23:59
     scheduler.add_job(limpar_cupons_surpresa_cron, "cron", hour=23, minute=59)
+
+    # Tempo/nota do HowLongToBeat: 04:00 todo dia, mas só os jogos vencidos.
+    scheduler.add_job(atualizar_hltb_cron, "cron", hour=4, minute=0)
 
     scheduler.start()
