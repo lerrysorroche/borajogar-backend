@@ -7,6 +7,7 @@ import os
 
 from auth import verificar_admin
 from database import get_db_connection
+from nomes import NOME_J
 import hltb
 from notificacoes import enviar_email, notificar_jogo_liberado, FRONTEND_URL
 from routes import usuarios, jogos, pagamentos, alugueis, admin, whatsapp
@@ -154,7 +155,7 @@ def enviar_lembretes_devolucao():
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("""
-            SELECT l.id, u.nome, u.email, u.telefone, j.titulo
+            SELECT l.id, u.nome, u.email, u.telefone, """ + NOME_J + """ AS titulo
             FROM locacoes l
             JOIN utilizadores u ON u.id = l.utilizador_id
             JOIN contas_psn c ON c.id = l.conta_psn_id
@@ -210,7 +211,7 @@ def processar_filas_automaticamente():
         cursor.execute("""
             SELECT DISTINCT
                 f.jogo_id,
-                j.titulo,
+                """ + NOME_J + """ AS titulo,
                 f.tipo_slot
             FROM fila_espera f
             JOIN jogos j ON f.jogo_id = j.id
@@ -411,6 +412,9 @@ def iniciar_servicos():
         )
         cursor.execute(
             "ALTER TABLE jogos ADD COLUMN IF NOT EXISTS hltb_atualizado_em TIMESTAMP"
+        )
+        cursor.execute(
+            "ALTER TABLE jogos ADD COLUMN IF NOT EXISTS subtitulo VARCHAR(150) DEFAULT ''"
         )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS notificacoes (id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255), mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"

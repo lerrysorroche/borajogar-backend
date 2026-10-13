@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pyotp
 
 from database import get_db_connection
+from nomes import NOME_J, nome_completo
 from auth import verificar_admin, verificar_usuario
 from models import NovaLocacao, NovaReserva, CancelarReserva, DevolucaoRequest
 
@@ -37,7 +38,7 @@ def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
             raise HTTPException(status_code=403, detail="whatsapp_nao_verificado")
 
         cursor.execute(
-            "SELECT titulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float FROM jogos WHERE id = %s",
+            "SELECT titulo, subtitulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float FROM jogos WHERE id = %s",
             (locacao.jogo_id,),
         )
         jogo_info = cursor.fetchone()
@@ -114,7 +115,7 @@ def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
             (
                 locacao.utilizador_id,
                 preco_final,
-                f"Aluguel {locacao.tipo_slot} ({locacao.dias_aluguel}d): {jogo_info['titulo']} - Rank {rank_atual}",
+                f"Aluguel {locacao.tipo_slot} ({locacao.dias_aluguel}d): {nome_completo(jogo_info['titulo'], jogo_info['subtitulo'])} - Rank {rank_atual}",
             ),
         )
         conn.commit()
@@ -211,7 +212,7 @@ def buscar_alugueis_usuario(usuario_id: int, usuario=Depends(verificar_usuario))
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
-        "SELECT l.id AS locacao_id, j.titulo AS jogo, c.email_login, c.senha_login, l.data_fim, l.status, l.tipo_slot FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id JOIN jogos j ON c.jogo_id = j.id WHERE l.utilizador_id = %s ORDER BY l.data_fim DESC;",
+        "SELECT l.id AS locacao_id, " + NOME_J + " AS jogo, c.email_login, c.senha_login, l.data_fim, l.status, l.tipo_slot FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id JOIN jogos j ON c.jogo_id = j.id WHERE l.utilizador_id = %s ORDER BY l.data_fim DESC;",
         (usuario_id,),
     )
     resultados = cursor.fetchall()
@@ -316,7 +317,7 @@ def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
 
         # 2. Puxa os dados do jogo
         cursor.execute(
-            "SELECT titulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float, data_lancamento FROM jogos WHERE id = %s",
+            "SELECT titulo, subtitulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float, data_lancamento FROM jogos WHERE id = %s",
             (reserva.jogo_id,),
         )
         jogo_info = cursor.fetchone()
@@ -377,7 +378,7 @@ def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
             (
                 reserva.utilizador_id,
                 preco_final,
-                f"Fila {reserva.tipo_slot} ({reserva.dias_aluguel}d): {jogo_info['titulo']} - Rank {rank_atual}",
+                f"Fila {reserva.tipo_slot} ({reserva.dias_aluguel}d): {nome_completo(jogo_info['titulo'], jogo_info['subtitulo'])} - Rank {rank_atual}",
             ),
         )
 
@@ -407,7 +408,7 @@ def cancelar_reserva(dados: CancelarReserva, usuario=Depends(verificar_usuario))
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute(
-            "SELECT f.jogo_id, f.tipo_slot, j.titulo FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id WHERE f.id = %s AND f.utilizador_id = %s AND f.status = 'AGUARDANDO'",
+            "SELECT f.jogo_id, f.tipo_slot, j.titulo, j.subtitulo FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id WHERE f.id = %s AND f.utilizador_id = %s AND f.status = 'AGUARDANDO'",
             (dados.reserva_id, dados.utilizador_id),
         )
         res = cursor.fetchone()
@@ -431,7 +432,7 @@ def cancelar_reserva(dados: CancelarReserva, usuario=Depends(verificar_usuario))
                 (
                     dados.utilizador_id,
                     reembolso,
-                    f"💸 Estorno de Fila: {res['titulo']}",
+                    f"💸 Estorno de Fila: {nome_completo(res['titulo'], res['subtitulo'])}",
                 ),
             )
 
@@ -464,7 +465,7 @@ def buscar_reservas_usuario(usuario_id: int, usuario=Depends(verificar_usuario))
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
         """
-        SELECT f.id AS reserva_id, j.id AS jogo_id, j.titulo AS jogo, j.data_lancamento, f.data_solicitacao, f.status, f.tipo_slot,
+        SELECT f.id AS reserva_id, j.id AS jogo_id, """ + NOME_J + """ AS jogo, j.data_lancamento, f.data_solicitacao, f.status, f.tipo_slot,
         (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA' AND l.tipo_slot = f.tipo_slot) AS proxima_devolucao
         FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id 
         WHERE f.utilizador_id = %s AND f.status = 'AGUARDANDO' ORDER BY f.data_solicitacao ASC;
