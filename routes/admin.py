@@ -7,6 +7,7 @@ import threading
 from database import get_db_connection
 from auth import verificar_admin
 import hltb
+from nomes import NOME_J, nome_completo
 from notificacoes import notificar_jogo_liberado
 from models import (
     EditarClienteRequest,
@@ -305,7 +306,7 @@ def listar_contas_manutencao(admin_data=Depends(verificar_admin)):
     # cada uma com o cliente certo -- por isso o UNION ALL em vez de tentar
     # escolher "qual das duas" mostrar numa linha só.
     cursor.execute("""
-        SELECT c.id AS conta_psn_id, 'PRIMARIA' AS tipo_slot, j.titulo AS jogo, c.email_login, c.senha_login AS senha_antiga,
+        SELECT c.id AS conta_psn_id, 'PRIMARIA' AS tipo_slot, """ + NOME_J + """ AS jogo, c.email_login, c.senha_login AS senha_antiga,
                (SELECT utilizador_id FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'PRIMARIA' ORDER BY data_fim DESC LIMIT 1) AS ultimo_cliente_id,
                (SELECT u.nome FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'PRIMARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_nome,
                (SELECT u.telefone FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'PRIMARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_telefone,
@@ -316,7 +317,7 @@ def listar_contas_manutencao(admin_data=Depends(verificar_admin)):
 
         UNION ALL
 
-        SELECT c.id AS conta_psn_id, 'SECUNDARIA' AS tipo_slot, j.titulo AS jogo, c.email_login, c.senha_login AS senha_antiga,
+        SELECT c.id AS conta_psn_id, 'SECUNDARIA' AS tipo_slot, """ + NOME_J + """ AS jogo, c.email_login, c.senha_login AS senha_antiga,
                (SELECT utilizador_id FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'SECUNDARIA' ORDER BY data_fim DESC LIMIT 1) AS ultimo_cliente_id,
                (SELECT u.nome FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'SECUNDARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_nome,
                (SELECT u.telefone FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'SECUNDARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_telefone,
@@ -398,8 +399,9 @@ def liberar_conta_manutencao(
                 (ultima_loc["id"],),
             )
 
-        cursor.execute("SELECT titulo FROM jogos WHERE id = %s", (jogo_id,))
-        titulo = cursor.fetchone()["titulo"]
+        cursor.execute("SELECT titulo, subtitulo FROM jogos WHERE id = %s", (jogo_id,))
+        jogo_row = cursor.fetchone()
+        titulo = nome_completo(jogo_row["titulo"], jogo_row["subtitulo"])
 
         # Puxa o próximo da fila específica daquele slot, estritamente por ordem de chegada.
         cursor.execute(
@@ -585,7 +587,7 @@ def listar_todas_locacoes(admin_data=Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
-        "SELECT l.id, u.nome AS cliente, j.titulo AS jogo, c.email_login, l.data_fim, l.status, l.tipo_slot "
+        "SELECT l.id, u.nome AS cliente, " + NOME_J + " AS jogo, c.email_login, l.data_fim, l.status, l.tipo_slot "
         "FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id "
         "JOIN contas_psn c ON l.conta_psn_id = c.id JOIN jogos j ON c.jogo_id = j.id ORDER BY l.data_fim ASC;"
     )
@@ -646,7 +648,7 @@ def listar_todas_reservas(admin_data=Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("""
-        SELECT f.id, u.nome AS cliente, j.id AS jogo_id, j.titulo AS jogo, j.data_lancamento, f.data_solicitacao, 
+        SELECT f.id, u.nome AS cliente, j.id AS jogo_id, """ + NOME_J + """ AS jogo, j.data_lancamento, f.data_solicitacao, 
                f.status, f.utilizador_id, f.dias_aluguel, f.tipo_slot,
         (SELECT MIN(l.data_fim) FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id WHERE c.jogo_id = f.jogo_id AND l.status = 'ATIVA' AND l.tipo_slot = f.tipo_slot) AS proxima_devolucao
         FROM fila_espera f JOIN utilizadores u ON f.utilizador_id = u.id JOIN jogos j ON f.jogo_id = j.id 
@@ -692,7 +694,7 @@ def admin_cancelar_reserva(reserva_id: int, admin_data=Depends(verificar_admin))
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute(
-            "SELECT f.utilizador_id, f.tipo_slot, j.titulo FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id WHERE f.id = %s AND f.status = 'AGUARDANDO'",
+            "SELECT f.utilizador_id, f.tipo_slot, j.titulo, j.subtitulo FROM fila_espera f JOIN jogos j ON f.jogo_id = j.id WHERE f.id = %s AND f.status = 'AGUARDANDO'",
             (reserva_id,),
         )
         res = cursor.fetchone()
@@ -714,14 +716,14 @@ def admin_cancelar_reserva(reserva_id: int, admin_data=Depends(verificar_admin))
                 (
                     res["utilizador_id"],
                     trans["valor"],
-                    f"💸 Estorno (Admin): {res['titulo']}",
+                    f"💸 Estorno (Admin): {nome_completo(res['titulo'], res['subtitulo'])}",
                 ),
             )
 
         cursor.execute("DELETE FROM fila_espera WHERE id = %s", (reserva_id,))
         conn.commit()
         return {
-            "mensagem": f"Reserva de {res['titulo']} cancelada e dinheiro estornado."
+            "mensagem": f"Reserva de {nome_completo(res['titulo'], res['subtitulo'])} cancelada e dinheiro estornado."
         }
     except Exception as e:
         conn.rollback()
@@ -883,7 +885,7 @@ def dossie_cliente(
         locacoes_total = cursor.fetchone()["total"]
         cursor.execute(
             """
-            SELECT l.id, j.titulo AS jogo, l.tipo_slot, l.data_fim, l.status,
+            SELECT l.id, """ + NOME_J + """ AS jogo, l.tipo_slot, l.data_fim, l.status,
                    l.cashback_pendente, l.status_beneficio
             FROM locacoes l
             JOIN contas_psn c ON c.id = l.conta_psn_id
@@ -919,7 +921,7 @@ def dossie_cliente(
 
         cursor.execute(
             """
-            SELECT f.id, j.titulo AS jogo, f.tipo_slot, f.dias_aluguel,
+            SELECT f.id, """ + NOME_J + """ AS jogo, f.tipo_slot, f.dias_aluguel,
                    f.data_solicitacao, f.status
             FROM fila_espera f
             JOIN jogos j ON j.id = f.jogo_id
@@ -964,7 +966,7 @@ def historico_jogo(jogo_id: int, admin_data=Depends(verificar_admin)):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cursor.execute("SELECT titulo FROM jogos WHERE id = %s", (jogo_id,))
+        cursor.execute("SELECT titulo, subtitulo FROM jogos WHERE id = %s", (jogo_id,))
         jogo = cursor.fetchone()
         if not jogo:
             raise HTTPException(status_code=404, detail="Jogo não encontrado.")
@@ -996,7 +998,7 @@ def historico_jogo(jogo_id: int, admin_data=Depends(verificar_admin)):
             m["valor"] = float(m["valor"])
 
         return {
-            "jogo": titulo,
+            "jogo": nome_completo(titulo, jogo["subtitulo"]),
             "faturamento_total": faturamento_total,
             "movimentacoes": movimentacoes,
         }

@@ -98,6 +98,7 @@ class JogoNovo(BaseModel):
     """
 
     titulo: str
+    subtitulo: str = ""
     plataforma: str
     preco_aluguel: float
     preco_aluguel_14: float = 0.0
@@ -120,6 +121,7 @@ class EditarJogoRequest(BaseModel):
     """
 
     titulo: str
+    subtitulo: str = ""
     plataforma: str
     preco_aluguel: float
     preco_aluguel_14: float = 0.0

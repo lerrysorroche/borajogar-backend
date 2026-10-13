@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 from database import get_db_connection
+from nomes import NOME_J
 from auth import verificar_admin, verificar_usuario
 from models import JogoNovo, EditarJogoRequest, VotoEnquete, NovaOpcaoEnquete
 import textwrap
@@ -51,7 +52,7 @@ def listar_jogos(usuario_id: int = 0):
         fator_desconto = 1.0 - (rank_cliente / 100.0)
 
         query = """
-            SELECT j.id, j.titulo, j.plataforma, j.descricao, j.url_imagem, j.tempo_jogo, j.tempo_platina, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
+            SELECT j.id, j.titulo, j.subtitulo, """ + NOME_J + """ AS nome_completo, j.plataforma, j.descricao, j.url_imagem, j.tempo_jogo, j.tempo_platina, j.nota, CAST(j.data_lancamento AS VARCHAR) as data_lancamento,
                 ROUND(CAST(j.preco_aluguel * %s AS numeric), 2)::float AS preco_aluguel,
                 ROUND(CAST(j.preco_aluguel_14 * %s AS numeric), 2)::float AS preco_aluguel_14,
                 ROUND(CAST(j.preco_secundaria * %s AS numeric), 2)::float AS preco_secundaria,
@@ -103,7 +104,7 @@ def listar_jogos(usuario_id: int = 0):
         conn.rollback()
         # FALLBACK CORRIGIDO COM PRIORIDADE_VITRINE PARA NÃO QUEBRAR AS TAGS!
         query_segura = """
-            SELECT j.id, j.titulo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14,
+            SELECT j.id, j.titulo, j.subtitulo, """ + NOME_J + """ AS nome_completo, j.plataforma, j.preco_aluguel, j.preco_aluguel_14,
                 j.preco_secundaria, j.preco_secundaria_14,
                 j.preco_aluguel AS preco_aluguel_base, j.preco_aluguel_14 AS preco_aluguel_14_base,
                 j.preco_secundaria AS preco_secundaria_base, j.preco_secundaria_14 AS preco_secundaria_14_base,
@@ -147,7 +148,7 @@ def listar_novidades_locadora():
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute(
-            "SELECT id, titulo, url_imagem, recomendacao_cliente FROM jogos ORDER BY id DESC LIMIT 5"
+            "SELECT j.id, j.titulo, j.subtitulo, " + NOME_J + " AS nome_completo, j.url_imagem, j.recomendacao_cliente FROM jogos j ORDER BY j.id DESC LIMIT 5"
         )
         return cursor.fetchall()
     except Exception as e:
@@ -175,17 +176,18 @@ def cadastrar_jogo(jogo: JogoNovo, admin_data=Depends(verificar_admin)):
     try:
         query = """
             INSERT INTO jogos (
-                titulo, plataforma,
+                titulo, subtitulo, plataforma,
                 preco_aluguel, preco_aluguel_14,
                 preco_secundaria, preco_secundaria_14,
                 descricao, url_imagem, tempo_jogo, tempo_platina, nota, data_lancamento,
                 recomendacao_cliente, meta_faturamento
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
         """
         cursor.execute(
             query,
             (
                 jogo.titulo,
+                jogo.subtitulo.strip(),
                 jogo.plataforma,
                 jogo.preco_aluguel,
                 jogo.preco_aluguel_14,
@@ -227,7 +229,7 @@ def editar_jogo_completo(
     try:
         query = """
             UPDATE jogos SET
-                titulo = %s, plataforma = %s,
+                titulo = %s, subtitulo = %s, plataforma = %s,
                 preco_aluguel = %s, preco_aluguel_14 = %s,
                 preco_secundaria = %s, preco_secundaria_14 = %s,
                 descricao = %s, url_imagem = %s, tempo_jogo = %s, tempo_platina = %s,
@@ -238,6 +240,7 @@ def editar_jogo_completo(
             query,
             (
                 dados.titulo,
+                dados.subtitulo.strip(),
                 dados.plataforma,
                 dados.preco_aluguel,
                 dados.preco_aluguel_14,
