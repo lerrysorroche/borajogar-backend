@@ -1,6 +1,9 @@
+import difflib
 import os
+import re
 import threading
 import time
+import unicodedata
 from datetime import datetime
 
 from database import get_db_connection
@@ -10,7 +13,9 @@ INTERVALO_DIAS = int(os.getenv("HLTB_INTERVALO_DIAS", "7"))
 
 # Atualização sem ninguém olhando não pode gravar o jogo errado: abaixo disso o
 # título é tratado como "não encontrado" e fica para o admin conferir à mão.
-SIMILARIDADE_MINIMA_AUTOMATICA = 0.85
+# 0.9 separa "Control Resonant" de "Control: Resonant" (iguais depois de
+# normalizar) de "Dispatch" vs "Dispatcher" (0.89, jogos diferentes).
+SIMILARIDADE_MINIMA_AUTOMATICA = 0.9
 
 # Pausa entre buscas, para não martelar um site que não tem API oficial.
 PAUSA_ENTRE_BUSCAS = 1.5
@@ -22,15 +27,106 @@ _trava = threading.Lock()
 estado = {"rodando": False}
 
 
+# Palavras de "edição" que a locadora usa no título e o HowLongToBeat não tem
+# (ele lista o jogo pelo nome simples). Só vocabulário conhecido é removido, para
+# nunca cortar parte do nome do jogo ("Spider-Man 2 Deluxe Edition" vira
+# "Spider-Man 2", não "Spider-Man").
+_PALAVRA_EDICAO = (
+    r"(?:digital|standard|deluxe?|ultimate|complete|definitive|gold|premium|special|"
+    r"collector'?s|game of the year|goty|anniversary|limited|launch|day[ -]one|"
+    r"legendary|enhanced|cross[- ]?gen|ps4|ps5|and|&|\+|the)"
+)
+_SEPARADOR = r"\s*(?:[:\-–—(]\s*)?"
+_SUFIXO_EDICAO = re.compile(
+    _SEPARADOR
+    + r"(?:"
+    + _PALAVRA_EDICAO
+    + r"\s+)*(?:edition|bundle|version|pack)\)?\s*$",
+    re.IGNORECASE,
+)
+_SUFIXO_SOLTO = re.compile(
+    _SEPARADOR + r"(?:deluxe|ultimate|complete|premium|goty|game of the year)\)?\s*$",
+    re.IGNORECASE,
+)
+
+
+_SUFIXO_PLATAFORMA = re.compile(
+    r"\s*[(\[]?\s*ps[45](?:\s*(?:&|/|and)\s*ps[45])?\s*[)\]]?\s*$", re.IGNORECASE
+)
+
+
+def remover_edicao(titulo):
+    """
+    'Dispatch: Deluxe Edition' -> 'Dispatch' (e '... (PS5)' -> sem a plataforma).
+    Sem sufixo de edição/plataforma, não muda nada.
+    """
+    limpo = _SUFIXO_PLATAFORMA.sub("", titulo).strip()
+    limpo = _SUFIXO_EDICAO.sub("", limpo).strip()
+    limpo = _SUFIXO_SOLTO.sub("", limpo).strip()
+    return limpo or titulo
+
+
+def normalizar(texto):
+    """Minúsculas, sem acento e sem pontuação: 'CONTROL Resonant' == 'Control: Resonant'."""
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", texto.casefold()).split())
+
+
+def pontuar(nome_hltb, variantes):
+    """Semelhança (0 a 1) entre o nome no HowLongToBeat e a melhor variante do título."""
+    alvo = normalizar(nome_hltb)
+    return max(
+        difflib.SequenceMatcher(None, alvo, normalizar(v)).ratio() for v in variantes
+    )
+
+
+def buscar_melhor(titulo):
+    """
+    Procura o jogo no HowLongToBeat e devolve (resultado, semelhança), ou
+    (None, 0) se o site respondeu mas não tem nada parecido.
+
+    Tenta o título como está e, se ele tiver sufixo de edição (Deluxe Edition,
+    Complete Edition...), também sem ele, porque o site só acha o nome simples.
+    Compara os nomes sem diferenciar maiúscula/pontuação/acento — a comparação
+    da própria biblioteca diferencia, e dava 0.61 para "CONTROL Resonant" vs
+    "Control: Resonant". Se o site não responder, levanta RuntimeError (assim
+    quem chama não confunde "site fora do ar" com "jogo não existe").
+    """
+    from howlongtobeatpy import HowLongToBeat
+
+    variantes = [titulo]
+    sem_edicao = remover_edicao(titulo)
+    if sem_edicao.lower() != titulo.lower():
+        variantes.append(sem_edicao)
+
+    melhor, nota_melhor = None, 0.0
+    for i, variante in enumerate(variantes):
+        if i:
+            time.sleep(PAUSA_ENTRE_BUSCAS)
+        resultados = HowLongToBeat(input_minimum_similarity=0.0).search(
+            variante, similarity_case_sensitive=False
+        )
+        if resultados is None:
+            raise RuntimeError("o HowLongToBeat não respondeu à busca")
+        for r in resultados:
+            nota = pontuar(r.game_name, variantes)
+            if nota > nota_melhor:
+                melhor, nota_melhor = r, nota
+        if nota_melhor >= SIMILARIDADE_MINIMA_AUTOMATICA:
+            break
+    return melhor, nota_melhor
+
+
 def formatar_horas(horas):
     # 0 = o site não tem esse dado (comum em jogo que ainda não saiu).
     return f"{max(1, round(horas))}h" if horas and horas >= 0.5 else ""
 
 
-def extrair_dados(resultado):
+def extrair_dados(resultado, similaridade):
     return {
         "nome": resultado.game_name,
-        "similaridade": round(resultado.similarity, 2),
+        "similaridade": round(similaridade, 2),
         "tempo_jogo": formatar_horas(resultado.main_story),
         "tempo_platina": formatar_horas(resultado.completionist),
         # O HowLongToBeat dá a nota de 0 a 100; o site mostra de 0 a 10.
@@ -53,7 +149,7 @@ def atualizar_jogos(forcar=False):
     """
     # Importa antes de pegar a trava: se a biblioteca estiver quebrada, o erro
     # sobe sem deixar a trava presa.
-    from howlongtobeatpy import HowLongToBeat
+    import howlongtobeatpy  # noqa: F401
 
     if not _trava.acquire(blocking=False):
         return False
@@ -92,7 +188,7 @@ def atualizar_jogos(forcar=False):
         erros_seguidos = 0
         for jogo_id, titulo in jogos:
             try:
-                resultados = HowLongToBeat().search(titulo)
+                melhor, similaridade = buscar_melhor(titulo)
                 erros_seguidos = 0
             except Exception as e:
                 erros_seguidos += 1
@@ -105,8 +201,7 @@ def atualizar_jogos(forcar=False):
             finally:
                 estado["processados"] += 1
 
-            melhor = max(resultados, key=lambda r: r.similarity) if resultados else None
-            if not melhor or melhor.similarity < SIMILARIDADE_MINIMA_AUTOMATICA:
+            if not melhor or similaridade < SIMILARIDADE_MINIMA_AUTOMATICA:
                 estado["nao_encontrados"].append(titulo)
                 cursor.execute(
                     "UPDATE jogos SET hltb_atualizado_em = CURRENT_TIMESTAMP WHERE id = %s",
@@ -116,7 +211,7 @@ def atualizar_jogos(forcar=False):
                 time.sleep(PAUSA_ENTRE_BUSCAS)
                 continue
 
-            dados = extrair_dados(melhor)
+            dados = extrair_dados(melhor, similaridade)
             campos = []
             valores = []
             for coluna, chave in (

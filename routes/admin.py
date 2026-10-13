@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
+import asyncio
 import threading
 
 from database import get_db_connection
@@ -1022,20 +1023,18 @@ async def buscar_dados_hltb(titulo: str, admin_data=Depends(verificar_admin)):
     erro 502 que o painel mostra sem impedir o preenchimento manual.
     """
     try:
-        from howlongtobeatpy import HowLongToBeat
-
-        resultados = await HowLongToBeat().async_search(titulo)
+        melhor, similaridade = await asyncio.to_thread(hltb.buscar_melhor, titulo)
     except Exception as e:
         raise HTTPException(
             status_code=502,
             detail=f"Não foi possível consultar o HowLongToBeat: {e}",
         )
 
-    if not resultados:
+    # Aqui o admin está olhando o resultado, então aceita-se uma semelhança menor
+    # que na atualização automática (o nome achado aparece no aviso para conferir).
+    if not melhor or similaridade < 0.5:
         return {"encontrado": False}
-
-    melhor = max(resultados, key=lambda r: r.similarity)
-    return {"encontrado": True, **hltb.extrair_dados(melhor)}
+    return {"encontrado": True, **hltb.extrair_dados(melhor, similaridade)}
 
 
 @router.post("/jogos/atualizar-hltb")
