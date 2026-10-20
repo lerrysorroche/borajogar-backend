@@ -370,6 +370,75 @@ def limpar_cupons_surpresa_cron():
         conn.close()
 
 
+# A verificação de WhatsApp vence: um número confirmado uma vez e nunca mais
+# checado pode ter sido abandonado (cliente que some com o jogo e o número morto).
+WHATSAPP_INATIVIDADE_DIAS = int(os.getenv("WHATSAPP_INATIVIDADE_DIAS", "60"))
+WHATSAPP_VALIDADE_DIAS = int(os.getenv("WHATSAPP_VALIDADE_DIAS", "365"))
+
+SQL_EXPIRAR_VERIFICACOES_WHATSAPP = """
+    WITH vencidas AS (
+        UPDATE utilizadores u SET whatsapp_verificado = FALSE
+        WHERE u.whatsapp_verificado = TRUE
+          AND u.is_admin = FALSE
+          AND NOT EXISTS (
+              SELECT 1 FROM locacoes l
+              WHERE l.utilizador_id = u.id AND l.status = 'ATIVA')
+          AND NOT EXISTS (
+              SELECT 1 FROM fila_espera f
+              WHERE f.utilizador_id = u.id AND f.status = 'AGUARDANDO')
+          AND (
+              u.whatsapp_verificado_em < CURRENT_TIMESTAMP - %s * INTERVAL '1 day'
+              OR GREATEST(
+                  u.whatsapp_verificado_em,
+                  (SELECT MAX(l.data_fim) FROM locacoes l WHERE l.utilizador_id = u.id)
+              ) < CURRENT_TIMESTAMP - %s * INTERVAL '1 day'
+          )
+        RETURNING u.id
+    )
+    INSERT INTO notificacoes (utilizador_id, mensagem, titulo, tipo)
+    SELECT id,
+           'Sua confirmação de WhatsApp venceu. Por segurança ela é renovada '
+           'periodicamente (por exemplo, após um tempo sem alugar). Confirme de '
+           'novo em Meus Acessos para voltar a alugar.',
+           '📲 Confirme seu WhatsApp',
+           'VERIFICACAO'
+    FROM vencidas
+"""
+
+
+def expirar_verificacoes_whatsapp():
+    """
+    Cron Job (Diário às 03:30):
+    Volta whatsapp_verificado para FALSE nas contas cuja verificação venceu, e o
+    cliente precisa confirmar de novo (aluguel, reserva e o aviso em Meus Acessos
+    já dependem só desse campo). Vence quando:
+      - ficou WHATSAPP_INATIVIDADE_DIAS (60) sem alugar nada, contado a partir da
+        data de fim do último aluguel ou da última verificação, o que for mais
+        recente (quem acabou de reverificar não é resetado na noite seguinte); ou
+      - a última verificação tem mais de WHATSAPP_VALIDADE_DIAS (365), mesmo para
+        quem aluga sempre (pega quem trocou de número no meio do caminho).
+    Quem tem aluguel ativo ou reserva na fila nunca é resetado no meio do serviço,
+    e admins ficam de fora. Cada conta resetada ganha um aviso no sino.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            SQL_EXPIRAR_VERIFICACOES_WHATSAPP,
+            (WHATSAPP_VALIDADE_DIAS, WHATSAPP_INATIVIDADE_DIAS),
+        )
+        resetadas = cursor.rowcount
+        conn.commit()
+        if resetadas:
+            print(f"📲 {resetadas} verificação(ões) de WhatsApp vencida(s) e resetada(s).")
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro no Cron de vencimento do WhatsApp: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def atualizar_hltb_cron():
     """
     Cron Job (Diário às 04:00):
@@ -416,6 +485,16 @@ def iniciar_servicos():
         cursor.execute(
             "ALTER TABLE jogos ADD COLUMN IF NOT EXISTS subtitulo VARCHAR(150) DEFAULT ''"
         )
+        # Data da última verificação do WhatsApp (para a verificação vencer).
+        # Quem já estava verificado antes desta coluna existir ganha "agora": ninguém
+        # é resetado de uma vez só por falta de data (a regra de inatividade ainda vale).
+        cursor.execute(
+            "ALTER TABLE utilizadores ADD COLUMN IF NOT EXISTS whatsapp_verificado_em TIMESTAMP"
+        )
+        cursor.execute(
+            "UPDATE utilizadores SET whatsapp_verificado_em = CURRENT_TIMESTAMP "
+            "WHERE whatsapp_verificado = TRUE AND whatsapp_verificado_em IS NULL"
+        )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS notificacoes (id SERIAL PRIMARY KEY, utilizador_id INT, reserva_id INT, jogo VARCHAR(255), mensagem TEXT, lida BOOLEAN DEFAULT FALSE, data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
@@ -434,6 +513,9 @@ def iniciar_servicos():
 
     # NOVO: Faxina de cupons rodando todo dia às 23:59
     scheduler.add_job(limpar_cupons_surpresa_cron, "cron", hour=23, minute=59)
+
+    # Vencimento da verificação de WhatsApp: 03:30 todo dia.
+    scheduler.add_job(expirar_verificacoes_whatsapp, "cron", hour=3, minute=30)
 
     # Tempo/nota do HowLongToBeat: 04:00 todo dia, mas só os jogos vencidos.
     scheduler.add_job(atualizar_hltb_cron, "cron", hour=4, minute=0)
