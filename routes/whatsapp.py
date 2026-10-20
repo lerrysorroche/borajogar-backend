@@ -59,14 +59,24 @@ def telefones_equivalentes(numero_a: str, numero_b: str) -> bool:
     )
 
 
-def numero_ja_bloqueado(cursor, numero_bruto: str) -> bool:
+def numero_ja_bloqueado(cursor, numero_bruto: str, utilizador_id=None) -> bool:
     """Verdadeiro se esse número (em qualquer variante do 9º dígito) já foi
-    verificado antes — em qualquer conta."""
+    verificado antes por OUTRA conta. Passe o utilizador_id de quem está
+    verificando: como a verificação agora vence (ver main.py ::
+    expirar_verificacoes_whatsapp), o dono do número precisa poder reverificar o
+    próprio número sem esbarrar no bloqueio que ele mesmo criou."""
     variantes = list(_variantes_telefone(normalizar_telefone(numero_bruto)))
-    cursor.execute(
-        "SELECT 1 FROM whatsapp_bloqueados WHERE numero = ANY(%s) LIMIT 1",
-        (variantes,),
-    )
+    if utilizador_id is None:
+        cursor.execute(
+            "SELECT 1 FROM whatsapp_bloqueados WHERE numero = ANY(%s) LIMIT 1",
+            (variantes,),
+        )
+    else:
+        cursor.execute(
+            "SELECT 1 FROM whatsapp_bloqueados "
+            "WHERE numero = ANY(%s) AND utilizador_id <> %s LIMIT 1",
+            (variantes, utilizador_id),
+        )
     return cursor.fetchone() is not None
 
 
@@ -248,12 +258,13 @@ async def receber_webhook_whatsapp(request: Request):
             )
             return {"status": "numero_nao_confere"}
 
-        if numero_ja_bloqueado(cursor, numero_remetente):
+        if numero_ja_bloqueado(cursor, numero_remetente, utilizador_id):
             print(f"Webhook WhatsApp: número {numero_remetente!r} já bloqueado, recusando.")
             return {"status": "numero_bloqueado"}
 
         cursor.execute(
-            "UPDATE utilizadores SET whatsapp_verificado = TRUE WHERE id = %s",
+            "UPDATE utilizadores SET whatsapp_verificado = TRUE, "
+            "whatsapp_verificado_em = CURRENT_TIMESTAMP WHERE id = %s",
             (utilizador_id,),
         )
         bloquear_numero(cursor, numero_remetente, utilizador_id)
@@ -304,7 +315,7 @@ def atualizar_telefone(
                 status_code=400,
                 detail="Seu WhatsApp já foi verificado e o número não pode mais ser alterado.",
             )
-        if numero_ja_bloqueado(cursor, dados.telefone):
+        if numero_ja_bloqueado(cursor, dados.telefone, usuario_id):
             raise HTTPException(
                 status_code=400,
                 detail="Este número de WhatsApp já foi verificado em outra conta e não pode ser usado novamente.",
@@ -371,14 +382,15 @@ def verificar_whatsapp_manual(
         usuario = cursor.fetchone()
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-        if numero_ja_bloqueado(cursor, usuario["telefone"]):
+        if numero_ja_bloqueado(cursor, usuario["telefone"], dados.utilizador_id):
             raise HTTPException(
                 status_code=400,
                 detail="Este número já foi verificado em outra conta. Desbloqueie-o antes de confirmar manualmente.",
             )
 
         cursor.execute(
-            "UPDATE utilizadores SET whatsapp_verificado = TRUE WHERE id = %s",
+            "UPDATE utilizadores SET whatsapp_verificado = TRUE, "
+            "whatsapp_verificado_em = CURRENT_TIMESTAMP WHERE id = %s",
             (dados.utilizador_id,),
         )
         bloquear_numero(cursor, usuario["telefone"], dados.utilizador_id)
