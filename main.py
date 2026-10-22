@@ -173,7 +173,8 @@ def enviar_lembretes_devolucao():
                     "⏰ Seu aluguel na Bora Jogar vence em breve!",
                     f"Faltam 12h, {loc['nome']}!",
                     f"<p>Seu aluguel de <strong>{loc['titulo']}</strong> está perto de vencer. "
-                    "Não esqueça de clicar em 'Devolver' na aba 'Meus Acessos' pra garantir seu Cashback e subir de Rank!</p>",
+                    "Não esqueça de clicar em 'Devolver' na aba 'Meus Acessos' pra garantir seu Cashback e subir de Rank: "
+                    "você apaga a conta da locadora do console e nos envia um vídeo curto no WhatsApp (o passo a passo está no botão Devolver).</p>",
                     cta_label="Ir para Meus Acessos",
                     cta_url=FRONTEND_URL,
                 )
