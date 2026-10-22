@@ -341,7 +341,7 @@ def liberar_conta_manutencao(
     """
     [U] O gatilho mais complexo do Admin (Atualizado com Benefícios).
     Você informa a nova senha que criou no site da PSN após constatar que a conta
-    foi desativada corretamente pelo cliente. O sistema:
+    foi apagada do console pelo cliente (vídeo recebido pelo WhatsApp). O sistema:
     1. Salva a nova senha.
     2. Descobre se era a Vaga Primária ou Secundária.
     3. Se o status_beneficio for 'PENDENTE', libera o Cashback e soma +1 no Rank do cliente honesto.
@@ -505,7 +505,7 @@ def aplicar_multa(dados: AplicarMultaRequest, admin_data=Depends(verificar_admin
                 (dados.valor, dados.utilizador_id),
             )
             cursor.execute(
-                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, 'MULTA: Conta não desativada no Console')",
+                "INSERT INTO transacoes (utilizador_id, tipo, valor, descricao) VALUES (%s, 'SAIDA', %s, 'MULTA: Conta não apagada do console (vídeo não enviado)')",
                 (dados.utilizador_id, dados.valor),
             )
 

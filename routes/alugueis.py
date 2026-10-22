@@ -188,7 +188,7 @@ def devolver_jogo(dados: DevolucaoRequest, usuario=Depends(verificar_usuario)):
 
         # MENSAGEM ALTERADA: Educando o cliente sobre a auditoria
         return {
-            "mensagem": "Devolução iniciada! A conta está em análise. O seu Rank e Cashback cairão na carteira assim que o sistema confirmar a desativação."
+            "mensagem": "Devolução iniciada! A conta está em análise. O seu Rank e Cashback cairão na carteira assim que conferirmos o vídeo da exclusão da conta no seu console (envie-o no WhatsApp da locadora)."
         }
     except Exception as e:
         conn.rollback()
