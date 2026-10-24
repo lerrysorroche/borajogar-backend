@@ -327,8 +327,10 @@ def gerar_checkout_stripe(recarga: NovaRecarga, usuario=Depends(verificar_usuari
         usr = cursor.fetchone()
         base_frontend = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
+        # Sem 'payment_method_types': a Stripe não aceita mais esse parâmetro (erro
+        # "no longer supported"). Os métodos de pagamento exibidos no checkout
+        # agora vêm do Dashboard (Configurações > Métodos de pagamento).
         session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
             customer_email=usr["email"],
             line_items=[
                 {
