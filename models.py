@@ -294,6 +294,8 @@ class ConfigRequest(BaseModel):
     anuncio_ativo: bool
     mensagem_anuncio: str
     banners_url: str = ""
+    # Tema sazonal: "auto" (segue o calendário), "normal", "halloween", "natal" ou "ano_novo"
+    tema_manual: str = "auto"
     enquete_titulo: str = "Próximas Adições: Você Decide!"
     enquete_subtitulo: str = (
         "Vote no jogo que você mais quer ver no catálogo e ajude a BORA JOGAR! a crescer."

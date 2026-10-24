@@ -8,6 +8,7 @@ from database import get_db_connection
 from auth import verificar_admin
 import hltb
 from nomes import NOME_J, nome_completo
+from temas import TEMAS_VALIDOS
 from notificacoes import notificar_jogo_liberado
 from models import (
     EditarClienteRequest,
@@ -35,6 +36,10 @@ def set_config(dados: ConfigRequest, admin_data=Depends(verificar_admin)):
     e os títulos dinâmicos que aparecem na área de Enquete da vitrine.
     Se não existir linha na tabela, cria uma nova.
     """
+    # Valor desconhecido vira "auto" (segue o calendário) em vez de quebrar o site.
+    tema_manual = (
+        dados.tema_manual if dados.tema_manual in ("auto", *TEMAS_VALIDOS) else "auto"
+    )
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -48,7 +53,8 @@ def set_config(dados: ConfigRequest, admin_data=Depends(verificar_admin)):
                     anuncio_ativo = %s, 
                     mensagem_anuncio = %s,
                     enquete_titulo = %s,
-                    enquete_subtitulo = %s
+                    enquete_subtitulo = %s,
+                    tema_manual = %s
                 """,
                 (
                     dados.devolucao_dinamica,
@@ -57,14 +63,15 @@ def set_config(dados: ConfigRequest, admin_data=Depends(verificar_admin)):
                     dados.mensagem_anuncio,
                     dados.enquete_titulo,
                     dados.enquete_subtitulo,
+                    tema_manual,
                 ),
             )
         else:
             cursor.execute(
                 """
                 INSERT INTO configuracoes 
-                (devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url, enquete_titulo, enquete_subtitulo) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (devolucao_dinamica, valor_por_dia, anuncio_ativo, mensagem_anuncio, banners_url, enquete_titulo, enquete_subtitulo, tema_manual) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     dados.devolucao_dinamica,
@@ -74,6 +81,7 @@ def set_config(dados: ConfigRequest, admin_data=Depends(verificar_admin)):
                     dados.banners_url,
                     dados.enquete_titulo,
                     dados.enquete_subtitulo,
+                    tema_manual,
                 ),
             )
         conn.commit()
