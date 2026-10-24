@@ -8,6 +8,7 @@ import os
 from auth import verificar_admin
 from database import get_db_connection
 from nomes import NOME_J
+from temas import tema_ativo
 import hltb
 from notificacoes import enviar_email, notificar_jogo_liberado, FRONTEND_URL
 from routes import usuarios, jogos, pagamentos, alugueis, admin, whatsapp
@@ -87,6 +88,10 @@ def get_config():
         )
         banners = [linha["url_imagem"].strip() for linha in cursor.fetchall()]
         config["banners"] = banners
+        # Tema sazonal já resolvido (manual do Admin ou calendário). 'tema_manual'
+        # segue na resposta para o Painel Admin mostrar a escolha atual.
+        config["tema_manual"] = config.get("tema_manual") or "auto"
+        config["tema_ativo"] = tema_ativo(config["tema_manual"])
         # Mantido só para um frontend antigo (ainda em cache) continuar funcionando.
         config["banners_url"] = ",".join(banners)
         return config
@@ -485,6 +490,9 @@ def iniciar_servicos():
         )
         cursor.execute(
             "ALTER TABLE jogos ADD COLUMN IF NOT EXISTS subtitulo VARCHAR(150) DEFAULT ''"
+        )
+        cursor.execute(
+            "ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS tema_manual VARCHAR(20) DEFAULT 'auto'"
         )
         # Data da última verificação do WhatsApp (para a verificação vencer).
         # Quem já estava verificado antes desta coluna existir ganha "agora": ninguém
