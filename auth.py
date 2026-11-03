@@ -19,6 +19,8 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
+# Para rotas públicas que personalizam a resposta quando há login (vitrine).
+seguranca_opcional = HTTPBearer(auto_error=False)
 
 
 def gerar_hash_senha(senha):
@@ -53,6 +55,20 @@ def verificar_usuario(credentials: HTTPAuthorizationCredentials = Depends(securi
     if not payload.get("id"):
         raise HTTPException(status_code=401, detail="Token inválido.")
     return payload
+
+
+def usuario_opcional(
+    credentials: HTTPAuthorizationCredentials = Depends(seguranca_opcional),
+):
+    """Payload do token se houver um login válido; None para visitante (ou token
+    vencido). Nunca recusa a requisição."""
+    if not credentials:
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    except Exception:
+        return None
+    return payload if payload.get("id") else None
 
 
 def verificar_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):

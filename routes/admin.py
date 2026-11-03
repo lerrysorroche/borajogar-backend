@@ -413,7 +413,7 @@ def liberar_conta_manutencao(
 
         # Puxa o próximo da fila específica daquele slot, estritamente por ordem de chegada.
         cursor.execute(
-            "SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY data_solicitacao ASC LIMIT 1",
+            "SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, fila_espera.nivel_platina, fila_espera.valor_pago, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY data_solicitacao ASC LIMIT 1",
             (jogo_id, slot_em_manutencao),
         )
         proximo = cursor.fetchone()
@@ -421,12 +421,14 @@ def liberar_conta_manutencao(
         if proximo:
             # Tem gente na fila: Cria a locação para o próximo e muda a conta para ALUGADA
             cursor.execute(
-                "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s)",
+                "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot, nivel_platina, valor_pago) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s, %s, %s)",
                 (
                     proximo["utilizador_id"],
                     dados.conta_psn_id,
                     proximo.get("dias_aluguel", 7),
                     slot_em_manutencao,
+                    proximo.get("nivel_platina") or 0,
+                    proximo.get("valor_pago"),
                 ),
             )
             cursor.execute(

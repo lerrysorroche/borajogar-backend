@@ -2,7 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 from database import get_db_connection
 from nomes import NOME_J
-from auth import verificar_admin, verificar_usuario
+from auth import verificar_admin, verificar_usuario, usuario_opcional
+import platina
 from models import JogoNovo, EditarJogoRequest, VotoEnquete, NovaOpcaoEnquete
 import textwrap
 import io
@@ -35,14 +36,20 @@ def get_font(size):
 
 
 @router.get("/jogos")
-def listar_jogos(usuario_id: int = 0):
+def listar_jogos(usuario=Depends(usuario_opcional)):
     """
     [R] O Motor da Vitrine Principal (Com Preços VIP Dinâmicos).
+
+    O cliente vem do token (login), não de um id na URL: com o Aluguel Platina
+    o preço revela quais jogos a pessoa já alugou, então ninguém pode consultar
+    o preço "de outra pessoa" trocando um número.
     """
+    usuario_id = usuario["id"] if usuario else 0
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
+    resultados = []
+    rank_cliente = 0
     try:
-        rank_cliente = 0
         if usuario_id > 0:
             cursor.execute("SELECT rank FROM utilizadores WHERE id = %s", (usuario_id,))
             resultado_rank = cursor.fetchone()
@@ -131,6 +138,31 @@ def listar_jogos(usuario_id: int = 0):
         """
         cursor.execute(query_segura)
         resultados = cursor.fetchall()
+
+    try:
+        # Preço final por jogo = preço base com Rank + Aluguel Platina (teto de 40%).
+        # Sobrescreve o preço que a consulta já calculou só com o Rank.
+        try:
+            historico = platina.ultimas_locacoes(cursor, usuario_id) if usuario_id > 0 else {}
+        except Exception:
+            conn.rollback()
+            historico = {}
+        for r in resultados:
+            ultima = historico.get(r["id"])
+            nivel = platina.nivel_do_proximo(ultima)
+            total, desconto_platina = platina.calcular_desconto(
+                rank_cliente, nivel, platina.eh_lancamento(r.get("data_lancamento"))
+            )
+            for campo in ("preco_aluguel", "preco_aluguel_14", "preco_secundaria", "preco_secundaria_14"):
+                r[f"{campo}_base"] = float(r.get(f"{campo}_base") or 0)
+                r[campo] = platina.preco_com_desconto(r[f"{campo}_base"], total)
+            r["rank_aplicado"] = rank_cliente
+            r["desconto_total"] = total
+            r["platina_nivel"] = nivel
+            r["platina_desconto"] = desconto_platina
+            r["platina_valido_ate"] = (
+                ultima["valido_ate"].date().isoformat() if desconto_platina and ultima else None
+            )
     finally:
         cursor.close()
         conn.close()
