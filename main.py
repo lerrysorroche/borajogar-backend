@@ -250,19 +250,21 @@ def processar_filas_automaticamente():
             contas_disponiveis = cursor.fetchall()
 
             for conta in contas_disponiveis:
-                query_proximo = "SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY data_solicitacao ASC LIMIT 1"
+                query_proximo = "SELECT fila_espera.id, fila_espera.utilizador_id, fila_espera.dias_aluguel, fila_espera.nivel_platina, fila_espera.valor_pago, u.nome, u.email, u.telefone FROM fila_espera JOIN utilizadores u ON u.id = fila_espera.utilizador_id WHERE fila_espera.jogo_id = %s AND fila_espera.status = 'AGUARDANDO' AND fila_espera.tipo_slot = %s ORDER BY data_solicitacao ASC LIMIT 1"
 
                 cursor.execute(query_proximo, (jogo_id, tipo_slot))
                 proximo = cursor.fetchone()
 
                 if proximo:
                     cursor.execute(
-                        "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s)",
+                        "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot, nivel_platina, valor_pago) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s, %s, %s)",
                         (
                             proximo["utilizador_id"],
                             conta["id"],
                             proximo.get("dias_aluguel", 7),
                             tipo_slot,
+                            proximo.get("nivel_platina") or 0,
+                            proximo.get("valor_pago"),
                         ),
                     )
                     cursor.execute(
@@ -494,6 +496,16 @@ def iniciar_servicos():
         cursor.execute(
             "ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS tema_manual VARCHAR(20) DEFAULT 'auto'"
         )
+        # Aluguel Platina: nível usado em cada locação/reserva e o valor pago
+        # (o valor pago limita o cashback a 50%). Linhas antigas: nível 0 e
+        # valor_pago NULL (cashback sem teto, como sempre foi).
+        for tabela in ("locacoes", "fila_espera"):
+            cursor.execute(
+                f"ALTER TABLE {tabela} ADD COLUMN IF NOT EXISTS nivel_platina SMALLINT DEFAULT 0"
+            )
+            cursor.execute(
+                f"ALTER TABLE {tabela} ADD COLUMN IF NOT EXISTS valor_pago NUMERIC(10, 2)"
+            )
         # Data da última verificação do WhatsApp (para a verificação vencer).
         # Quem já estava verificado antes desta coluna existir ganha "agora": ninguém
         # é resetado de uma vez só por falta de data (a regra de inatividade ainda vale).

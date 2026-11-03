@@ -5,6 +5,7 @@ import pyotp
 
 from database import get_db_connection
 from nomes import NOME_J, nome_completo
+import platina
 from auth import verificar_admin, verificar_usuario
 from models import NovaLocacao, NovaReserva, CancelarReserva, DevolucaoRequest
 
@@ -38,7 +39,7 @@ def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
             raise HTTPException(status_code=403, detail="whatsapp_nao_verificado")
 
         cursor.execute(
-            "SELECT titulo, subtitulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float FROM jogos WHERE id = %s",
+            "SELECT titulo, subtitulo, preco_aluguel::float, preco_aluguel_14::float, preco_secundaria::float, preco_secundaria_14::float, data_lancamento FROM jogos WHERE id = %s",
             (locacao.jogo_id,),
         )
         jogo_info = cursor.fetchone()
@@ -68,10 +69,16 @@ def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
         saldo = usr_info["saldo"]
         rank_atual = usr_info.get("rank", 0)
 
-        # Calcula o desconto (Máximo 20%)
-        desconto_percentual = min(rank_atual, 20)
-        valor_desconto = preco_base * (desconto_percentual / 100.0)
-        preco_final = preco_base - valor_desconto
+        # Desconto: Rank VIP + Aluguel Platina (teto de 40%, ver platina.py)
+        nivel_platina = platina.nivel_do_proximo(
+            platina.ultimas_locacoes(cursor, locacao.utilizador_id, locacao.jogo_id).get(
+                locacao.jogo_id
+            )
+        )
+        desconto_total, desconto_platina = platina.calcular_desconto(
+            rank_atual, nivel_platina, platina.eh_lancamento(jogo_info["data_lancamento"])
+        )
+        preco_final = platina.preco_com_desconto(preco_base, desconto_total)
 
         if saldo < preco_final:
             raise HTTPException(
@@ -99,12 +106,14 @@ def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
             (preco_final, locacao.utilizador_id),
         )
         cursor.execute(
-            "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s) RETURNING id, data_fim;",
+            "INSERT INTO locacoes (utilizador_id, conta_psn_id, data_fim, status, tipo_slot, nivel_platina, valor_pago) VALUES (%s, %s, CURRENT_TIMESTAMP + %s * INTERVAL '1 day', 'ATIVA', %s, %s, %s) RETURNING id, data_fim;",
             (
                 locacao.utilizador_id,
                 conta["id"],
                 locacao.dias_aluguel,
                 locacao.tipo_slot,
+                nivel_platina,
+                preco_final,
             ),
         )
         recibo = cursor.fetchone()
@@ -115,7 +124,8 @@ def realizar_locacao(locacao: NovaLocacao, usuario=Depends(verificar_usuario)):
             (
                 locacao.utilizador_id,
                 preco_final,
-                f"Aluguel {locacao.tipo_slot} ({locacao.dias_aluguel}d): {nome_completo(jogo_info['titulo'], jogo_info['subtitulo'])} - Rank {rank_atual}",
+                f"Aluguel {locacao.tipo_slot} ({locacao.dias_aluguel}d): {nome_completo(jogo_info['titulo'], jogo_info['subtitulo'])} - Rank {rank_atual}"
+                + (f" - Platina {desconto_platina}%" if desconto_platina else ""),
             ),
         )
         conn.commit()
@@ -149,7 +159,7 @@ def devolver_jogo(dados: DevolucaoRequest, usuario=Depends(verificar_usuario)):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute(
-            "SELECT status, conta_psn_id, tipo_slot, EXTRACT(EPOCH FROM (data_fim - CURRENT_TIMESTAMP))/3600 AS horas FROM locacoes WHERE id = %s AND utilizador_id = %s",
+            "SELECT status, conta_psn_id, tipo_slot, valor_pago, EXTRACT(EPOCH FROM (data_fim - CURRENT_TIMESTAMP))/3600 AS horas FROM locacoes WHERE id = %s AND utilizador_id = %s",
             (dados.locacao_id, dados.utilizador_id),
         )
         loc = cursor.fetchone()
@@ -172,6 +182,9 @@ def devolver_jogo(dados: DevolucaoRequest, usuario=Depends(verificar_usuario)):
             # ATUALIZAÇÃO: Taxa fixa (R$ 2) + R$ 1,00 por cada dia antecipado
             cashback_recompensa = valor_base + (dias_restantes * 1.0)
             coluna_status = "status_primaria"
+
+        # Teto: o cashback nunca passa de metade do que foi pago (ver platina.py).
+        cashback_recompensa = platina.limitar_cashback(cashback_recompensa, loc["valor_pago"])
 
         # A NOVA TRAVA: Adicionamos o status_beneficio = 'PENDENTE'
         cursor.execute(
@@ -212,7 +225,7 @@ def buscar_alugueis_usuario(usuario_id: int, usuario=Depends(verificar_usuario))
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute(
-        "SELECT l.id AS locacao_id, " + NOME_J + " AS jogo, c.email_login, c.senha_login, l.data_fim, l.status, l.tipo_slot FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id JOIN jogos j ON c.jogo_id = j.id WHERE l.utilizador_id = %s ORDER BY l.data_fim DESC;",
+        "SELECT l.id AS locacao_id, " + NOME_J + " AS jogo, c.email_login, c.senha_login, l.data_fim, l.status, l.tipo_slot, l.valor_pago::float AS valor_pago FROM locacoes l JOIN contas_psn c ON l.conta_psn_id = c.id JOIN jogos j ON c.jogo_id = j.id WHERE l.utilizador_id = %s ORDER BY l.data_fim DESC;",
         (usuario_id,),
     )
     resultados = cursor.fetchall()
@@ -345,10 +358,16 @@ def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
         saldo = usr_info["saldo"]
         rank_atual = usr_info.get("rank", 0)
 
-        # 4. APLICAÇÃO DO DESCONTO VIP MÁXIMO DE 20%
-        desconto_percentual = min(rank_atual, 20)
-        valor_desconto = preco_base * (desconto_percentual / 100.0)
-        preco_final = preco_base - valor_desconto
+        # 4. Desconto: Rank VIP + Aluguel Platina (teto de 40%, ver platina.py)
+        nivel_platina = platina.nivel_do_proximo(
+            platina.ultimas_locacoes(cursor, reserva.utilizador_id, reserva.jogo_id).get(
+                reserva.jogo_id
+            )
+        )
+        desconto_total, desconto_platina = platina.calcular_desconto(
+            rank_atual, nivel_platina, platina.eh_lancamento(jogo_info["data_lancamento"])
+        )
+        preco_final = platina.preco_com_desconto(preco_base, desconto_total)
 
         if saldo < preco_final:
             raise HTTPException(
@@ -362,12 +381,14 @@ def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
             (preco_final, reserva.utilizador_id),
         )
         cursor.execute(
-            "INSERT INTO fila_espera (utilizador_id, jogo_id, dias_aluguel, tipo_slot) VALUES (%s, %s, %s, %s) RETURNING id",
+            "INSERT INTO fila_espera (utilizador_id, jogo_id, dias_aluguel, tipo_slot, nivel_platina, valor_pago) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 reserva.utilizador_id,
                 reserva.jogo_id,
                 reserva.dias_aluguel,
                 reserva.tipo_slot,
+                nivel_platina,
+                preco_final,
             ),
         )
         reserva_id = cursor.fetchone()["id"]
@@ -378,7 +399,8 @@ def entrar_fila(reserva: NovaReserva, usuario=Depends(verificar_usuario)):
             (
                 reserva.utilizador_id,
                 preco_final,
-                f"Fila {reserva.tipo_slot} ({reserva.dias_aluguel}d): {nome_completo(jogo_info['titulo'], jogo_info['subtitulo'])} - Rank {rank_atual}",
+                f"Fila {reserva.tipo_slot} ({reserva.dias_aluguel}d): {nome_completo(jogo_info['titulo'], jogo_info['subtitulo'])} - Rank {rank_atual}"
+                + (f" - Platina {desconto_platina}%" if desconto_platina else ""),
             ),
         )
 
