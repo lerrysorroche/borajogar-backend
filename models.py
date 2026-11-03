@@ -252,13 +252,16 @@ class ResetSenhaRequest(BaseModel):
 
 class AplicarMultaRequest(BaseModel):
     """
-    Acionado pelo botão 'Cobrar no WhatsApp'.
-    Além da multa financeira, o backend cortará o Rank pela metade
-    e cancelará Cashbacks pendentes.
+    Acionado pelo botão 'Aplicar Multa' da Manutenção.
+    Além da multa financeira, o backend cortará o Rank pela metade e cancelará
+    o cashback pendente DA DEVOLUÇÃO informada em locacao_id.
     """
 
     utilizador_id: int
     valor: float = 0.0  # Mudei o padrão para 0.0 para ser flexível (só punir Rank)
+    # Devolução que motivou a multa. Sem ele (versão antiga do painel), o
+    # comportamento antigo vale: cancela todas as devoluções pendentes do cliente.
+    locacao_id: Optional[int] = None
 
 
 class AjusteSaldoRequest(BaseModel):
