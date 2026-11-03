@@ -319,6 +319,8 @@ def listar_contas_manutencao(admin_data=Depends(verificar_admin)):
                (SELECT u.nome FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'PRIMARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_nome,
                (SELECT u.telefone FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'PRIMARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_telefone,
                (SELECT cashback_pendente FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'PRIMARIA' ORDER BY data_fim DESC LIMIT 1) AS cashback_pendente,
+               (SELECT id FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'PRIMARIA' ORDER BY data_fim DESC LIMIT 1) AS ultima_locacao_id,
+               (SELECT status_beneficio FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'PRIMARIA' ORDER BY data_fim DESC LIMIT 1) AS status_beneficio,
                c.status_primaria, c.status_secundaria
         FROM contas_psn c JOIN jogos j ON c.jogo_id = j.id
         WHERE c.status_primaria = 'MANUTENCAO'
@@ -330,6 +332,8 @@ def listar_contas_manutencao(admin_data=Depends(verificar_admin)):
                (SELECT u.nome FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'SECUNDARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_nome,
                (SELECT u.telefone FROM locacoes l JOIN utilizadores u ON l.utilizador_id = u.id WHERE l.conta_psn_id = c.id AND l.tipo_slot = 'SECUNDARIA' ORDER BY l.data_fim DESC LIMIT 1) AS ultimo_cliente_telefone,
                (SELECT cashback_pendente FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'SECUNDARIA' ORDER BY data_fim DESC LIMIT 1) AS cashback_pendente,
+               (SELECT id FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'SECUNDARIA' ORDER BY data_fim DESC LIMIT 1) AS ultima_locacao_id,
+               (SELECT status_beneficio FROM locacoes WHERE conta_psn_id = c.id AND tipo_slot = 'SECUNDARIA' ORDER BY data_fim DESC LIMIT 1) AS status_beneficio,
                c.status_primaria, c.status_secundaria
         FROM contas_psn c JOIN jogos j ON c.jogo_id = j.id
         WHERE c.status_secundaria = 'MANUTENCAO'
@@ -496,6 +500,36 @@ def resetar_trava_2fa_admin(locacao_id: int, admin_data=Depends(verificar_admin)
         conn.close()
 
 
+@router.post("/locacoes/{locacao_id}/cobranca")
+def registrar_cobranca(locacao_id: int, admin_data=Depends(verificar_admin)):
+    """
+    [U] Chamado quando o Admin clica em 'Cobrar via Whats' na Manutenção.
+    Se foi preciso cobrar, a devolução não veio certa (conta ainda no console,
+    vídeo não enviado...): o cliente perde o cashback e o Rank não sobe dessa
+    devolução, aconteça o que acontecer depois (mesmo se ele resolver ou se a
+    desativação for feita remotamente). Não mexe em multa nem no Rank atual;
+    isso continua sendo o botão 'Aplicar Multa'.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE locacoes SET status_beneficio = 'CANCELADO', cashback_pendente = 0 "
+            "WHERE id = %s AND status = 'EXPIRADA' AND status_beneficio IS DISTINCT FROM 'PAGO' "
+            "RETURNING id",
+            (locacao_id,),
+        )
+        cancelou = cursor.fetchone() is not None
+        conn.commit()
+        return {"cancelado": cancelou}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.post("/multar")
 def aplicar_multa(dados: AplicarMultaRequest, admin_data=Depends(verificar_admin)):
     """
@@ -519,11 +553,19 @@ def aplicar_multa(dados: AplicarMultaRequest, admin_data=Depends(verificar_admin
                 (dados.utilizador_id, dados.valor),
             )
 
-        # 2. Cancela os Benefícios e o Cashback Pendente
-        cursor.execute(
-            "UPDATE locacoes SET status_beneficio = 'CANCELADO', cashback_pendente = 0 WHERE utilizador_id = %s AND status = 'EXPIRADA' AND status_beneficio = 'PENDENTE'",
-            (dados.utilizador_id,),
-        )
+        # 2. Cancela o benefício DESTA devolução. Antes cancelava todas as
+        # devoluções pendentes do cliente: quem tinha dois jogos em manutenção,
+        # um devolvido certinho, perdia o cashback dos dois.
+        if dados.locacao_id:
+            cursor.execute(
+                "UPDATE locacoes SET status_beneficio = 'CANCELADO', cashback_pendente = 0 WHERE id = %s AND utilizador_id = %s AND status_beneficio IS DISTINCT FROM 'PAGO'",
+                (dados.locacao_id, dados.utilizador_id),
+            )
+        else:
+            cursor.execute(
+                "UPDATE locacoes SET status_beneficio = 'CANCELADO', cashback_pendente = 0 WHERE utilizador_id = %s AND status = 'EXPIRADA' AND status_beneficio = 'PENDENTE'",
+                (dados.utilizador_id,),
+            )
 
         # 3. Corta o Rank pela Metade
         cursor.execute(
@@ -626,8 +668,10 @@ def revogar_locacao_admin(locacao_id: int, admin_data=Depends(verificar_admin)):
                 status_code=400, detail="Locação inválida ou já expirada."
             )
 
+        # Revogada pelo Admin não é devolução: sem cashback e sem Rank, sempre
+        # (antes dependia do valor padrão da coluna no banco).
         cursor.execute(
-            "UPDATE locacoes SET status = 'EXPIRADA', data_fim = CURRENT_TIMESTAMP WHERE id = %s",
+            "UPDATE locacoes SET status = 'EXPIRADA', data_fim = CURRENT_TIMESTAMP, status_beneficio = 'CANCELADO', cashback_pendente = 0 WHERE id = %s",
             (locacao_id,),
         )
         coluna_status = (
