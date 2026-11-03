@@ -5,7 +5,7 @@ Regras (definidas com o dono da locadora):
   - 1ª locação do jogo: preço normal (nível 0).
   - 2ª locação: 20% (nível 1). 3ª em diante: 40% (nível 2, o máximo).
   - O desconto só vale se a locação anterior DESSE jogo terminou há no máximo
-    JANELA_DIAS (3 meses). Passou disso, a sequência zera e o próximo aluguel
+    JANELA_DIAS (6 meses). Passou disso, a sequência zera e o próximo aluguel
     volta ao preço normal (e conta de novo como "1ª").
   - Platina + Rank somados nunca passam de DESCONTO_TOTAL_MAXIMO (40%).
     A soma é composta: 20% de Platina + 20% de Rank = 36%, não 40%.
@@ -25,19 +25,19 @@ from datetime import date, datetime, timedelta
 
 from temas import hoje_brasilia
 
-JANELA_DIAS = 90
+JANELA_DIAS = 180
 DESCONTO_POR_NIVEL = 20
 NIVEL_MAXIMO = 2
 DESCONTO_TOTAL_MAXIMO = 40.0
 DESCONTO_RANK_MAXIMO = 20
-DIAS_LANCAMENTO = 90
+DIAS_LANCAMENTO = 60
 CASHBACK_MAX_FRACAO = 0.5
 
 
 def ultimas_locacoes(cursor, utilizador_id, jogo_id=None):
     """
     Última locação ENCERRADA de cada jogo do cliente (ou só do jogo pedido),
-    com a indicação se ainda está dentro da janela de 3 meses. A janela é
+    com a indicação se ainda está dentro da janela de 6 meses. A janela é
     calculada no próprio banco para não depender do fuso do servidor.
     Exige cursor do tipo RealDictCursor. Devolve {jogo_id: linha}.
     """
